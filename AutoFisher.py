@@ -2,10 +2,9 @@ import mss
 from PIL import Image
 import pytesseract
 from pynput import keyboard
-import re
+import random
 import time
 from datetime import datetime
-from itertools import product
 import threading
 import sys
 import os
@@ -38,15 +37,9 @@ CAPTURE_AREA = {
 # **IMPORTANT**: Set the path to the Tesseract executable
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# OCR FUZZY CANDIDATE CONFIG
-COMMON_ERRORS = {
-    'c': ['c', 'e', 'o'], 'e': ['e', 'c'],
-    'o': ['o', 'c', '0', 'O'], 'i': ['i', 'l', '1'],
-    'l': ['l', 'i', '1'], 's': ['s', '5'],
-    'z': ['z', '2'], '0': ['0', 'o', 'O'],
-    '1': ['1', 'l', 'i'], '5': ['5', 's', 'S'],
-    '2': ['2', 'z', 'Z'], '4': ['4', 'A', 'H'],
-}
+# CAPTCHA HANDLING CONSTANTS
+ANTI_BOT_DISABLE_DURATION = 10 * 60  # 10 minutes
+POST_CAPTCHA_DELAY_RANGE = (4, 10)  # Seconds
 
 # =====================================================================
 # --- 2. GLOBAL STATE AND THREAD CONTROLS ---
@@ -57,8 +50,10 @@ fish_thread = None
 check_thread = None
 solver = None
 captcha_found = threading.Event()
-LAST_CANDIDATE_SET = set()
 TERMINATION_REASON = "Script manually started/stopped."
+LAST_SOLVED_CODE = None
+ANTI_BOT_DISABLED_UNTIL = 0.0
+LAST_SUPPRESSION_LOG = 0.0
 
 # =====================================================================
 # --- 3. LOGGING AND CONTROL FUNCTIONS ---
@@ -102,7 +97,7 @@ def log_termination(reason, details=""):
         f"  Reason: {reason}\n"
         f"  Details: {details}\n"
         f"  Active CAPTCHA State: {captcha_found.is_set()}\n"
-        f"  Last Candidates: {list(LAST_CANDIDATE_SET)}\n"
+        f"  Last Captcha Solution: {LAST_SOLVED_CODE}\n"
         f"----------------------------------------\n"
     )
 
@@ -199,85 +194,9 @@ def clear_input_line():
     time.sleep(0.1)
 
 
-def generate_candidates(code):
-    """Generates alternative code candidates based on common OCR errors."""
-    if not code or len(code) < 4:
-        return []
-
-    original_ocr_code = code
-    substitution_groups = []
-
-    for char in code:
-        char_lower = char.lower()
-        group = []
-
-        if char_lower in COMMON_ERRORS:
-            for alt in COMMON_ERRORS[char_lower]:
-                if char.isupper() and alt.isalpha():
-                    group.append(alt.upper())
-                else:
-                    group.append(alt)
-
-        group.append(char)
-        substitution_groups.append(list(set(group)))
-
-    candidate_tuples = list(product(*substitution_groups))
-    candidates = ["".join(t) for t in candidate_tuples if len("".join(t)) == len(code)]
-
-    unique_candidates = list(dict.fromkeys(candidates))
-    if original_ocr_code in unique_candidates:
-        unique_candidates.remove(original_ocr_code)
-    unique_candidates.insert(0, original_ocr_code)
-
-    return unique_candidates
-
-
 # =====================================================================
-# --- 5. VERIFICATION LOGIC FUNCTIONS ---
+# --- 5. CAPTCHA VERIFICATION HELPERS ---
 # =====================================================================
-
-def verify_ocr_candidate(code):
-    """
-    Submits /verify code and checks for result with 10s + 10s logic (OCR Path).
-    Returns "may now continue", "incorrect", or "stop".
-    """
-
-    log_event("COMMAND", "verify_ocr_candidate", f"Inputting: /verify {code}")
-    clear_input_line()
-    time.sleep(1)
-    keyboard_input("/verify")
-    keyboard_press(keyboard.Key.enter)
-    time.sleep(1)
-    keyboard_input(code)
-    keyboard_press(keyboard.Key.enter)
-
-    # --- Check 1: Wait 10 seconds ---
-    log_event("INFO", "verify_ocr_candidate", "Waiting 10s for result (Check 1).")
-    time.sleep(10.0)
-
-    for attempt in range(1, 3):
-        img = save_screenshot("verification_check.png")  # Temp screenshot for OCR check
-        raw_text = ocr_screenshot(img)
-        raw_text_lower = raw_text.lower()
-        log_event("VERIFY", "verify_ocr_candidate", f"Screen check {attempt} after wait.", raw_text)
-
-        if "may now continue" in raw_text_lower:
-            log_event("SUCCESS", "verify_ocr_candidate", "Code accepted ('may now continue' found).")
-            return "may now continue"
-
-        elif "incorrect" in raw_text_lower:
-            log_event("FAILURE", "verify_ocr_candidate", "Code rejected ('incorrect' found).")
-            return "incorrect"
-
-        if attempt == 1:
-            log_event("INFO", "verify_ocr_candidate", "Result unclear. Waiting 10s more (Check 2).")
-            time.sleep(10.0)
-        else:
-            log_event("CRITICAL", "verify_ocr_candidate", "Verification failed to get clear response after 20 seconds.")
-            return "stop"
-
-    return "stop"
-
 
 def api_solve_captcha(img_path):
     """Sends the CAPTCHA image path to the 2Captcha service for solving."""
@@ -350,40 +269,6 @@ def verify_api_response_timing(code):
             return False
 
     return False
-
-
-def solve_captcha(candidates):
-    """
-    Attempts to solve the captcha using the fuzzy candidates list.
-    Returns True if solved and fishing should resume, False if exhausted/critical error.
-    """
-    log_event("SOLVER", "solve_captcha", f"Starting Fuzzy Solver with {len(candidates)} candidates.")
-
-    # Start from the second candidate (the first one failed the primary check)
-    start_index = 1
-    if len(candidates) <= 1:
-        stop_script("Candidate list was critically short.",
-                    details="Original OCR failed and no substitutions were possible.")
-        return False
-
-    for i in range(start_index, len(candidates)):
-        candidate = candidates[i]
-        log_event("SOLVER", "solve_captcha", f"Attempting candidate {i + 1}/{len(candidates)}: **{candidate}**")
-
-        result = verify_ocr_candidate(candidate)
-
-        if result == "may now continue":
-            log_event("SUCCESS", "solve_captcha", f"Candidate **{candidate}** accepted.")
-            return True
-        elif result == "incorrect":
-            pass
-        elif result == "stop":
-            return False
-
-    stop_script("Candidate Exhaustion", details="Fuzzy Candidate list exhausted without finding the correct code.")
-    return False
-
-
 # =====================================================================
 # --- 6. MAIN THREAD LOOPS ---
 # =====================================================================
@@ -414,7 +299,9 @@ def fish_loop():
 def check_loop():
     """Second loop: continuously checks the screen for captcha or stop warnings."""
     global running
-    global LAST_CANDIDATE_SET
+    global LAST_SOLVED_CODE
+    global ANTI_BOT_DISABLED_UNTIL
+    global LAST_SUPPRESSION_LOG
 
     while running:
         time.sleep(1)
@@ -433,69 +320,62 @@ def check_loop():
         # --- CAPTCHA DETECTION FLOW ---
 
         if "anti-bot" in raw_text_lower:
+            current_time = time.time()
+
+            if current_time < ANTI_BOT_DISABLED_UNTIL:
+                remaining = ANTI_BOT_DISABLED_UNTIL - current_time
+                if captcha_found.is_set():
+                    captcha_found.clear()
+                if current_time - LAST_SUPPRESSION_LOG >= 5:
+                    log_event(
+                        "INFO",
+                        "check_loop",
+                        f"Anti-bot detection suppressed for another {remaining:.0f}s after recent success.",
+                        raw_text,
+                    )
+                    LAST_SUPPRESSION_LOG = current_time
+                continue
 
             if not captcha_found.is_set():
                 captcha_found.set()
                 log_event("CAPTCHA", "check_loop", "CAPTCHA detected. Pausing fish loop.", raw_text)
 
-            primary_match = re.search(r'Code:\s*([A-Za-z0-9]+)', raw_text)
+            last_img_path = save_last_captcha_image()
+            if last_img_path is None:
+                stop_script("Failed to capture captcha image.", details="Screenshot capture failed.")
+                return
 
-            if primary_match:
-                # --- PATH 1: FUZZY CANDIDATE PATH (Text CAPTCHA) ---
-                captcha_code = primary_match.group(1).strip()
+            solved_code = api_solve_captcha(last_img_path)
 
-                # CACHE CHECK: Prevents re-attempting the solve on the same code.
-                if LAST_CANDIDATE_SET and captcha_code in LAST_CANDIDATE_SET:
-                    log_event("INFO", "check_loop",
-                              f"Detected code **{captcha_code}** is a repeat. Waiting (Cache Hit).")
+            if not solved_code:
+                stop_script("2Captcha API failed.", details="API call failed or returned no code.")
+                return
 
-                    # 🚀 FIX: Clear the flag here to signal the fish_loop to resume.
-                    captcha_found.clear()
+            if not verify_api_response_timing(solved_code):
+                stop_script("API result verification failed.", details=f"API Code: {solved_code}")
+                return
 
-                    time.sleep(1)
-                    continue
+            LAST_SOLVED_CODE = solved_code
+            ANTI_BOT_DISABLED_UNTIL = time.time() + ANTI_BOT_DISABLE_DURATION
+            LAST_SUPPRESSION_LOG = 0.0
 
-                candidates = generate_candidates(captcha_code)
-                LAST_CANDIDATE_SET = set(candidates)
-                original_ocr_candidate = candidates[0]
+            delay = random.uniform(*POST_CAPTCHA_DELAY_RANGE)
+            disable_minutes = ANTI_BOT_DISABLE_DURATION / 60
+            log_event(
+                "SUCCESS",
+                "check_loop",
+                (
+                    f"Captcha solved via 2Captcha ({solved_code}). Waiting {delay:.2f}s before resuming. "
+                    f"Anti-bot detection disabled for {disable_minutes:.1f} minutes."
+                ),
+            )
 
-                log_event("SOLVER", "check_loop", f"OCR detected code: {captcha_code}. Starting primary verification.")
-
-                result = verify_ocr_candidate(original_ocr_candidate)
-
-                if result == "may now continue":
-                    captcha_found.clear()
-
-                elif result == "incorrect":
-                    if solve_captcha(candidates):
-                        captcha_found.clear()
-
-                elif result == "stop":
-                    return
-
-            else:
-                # --- PATH 2: API PATH (Image CAPTCHA) ---
-                log_event("API_PATH", "check_loop", "No 'Code:' string found. Switching to 2Captcha API.", raw_text)
-
-                last_img_path = save_last_captcha_image()
-                solved_code = api_solve_captcha(last_img_path)
-
-                if solved_code:
-                    if verify_api_response_timing(solved_code):
-                        captcha_found.clear()
-                        LAST_CANDIDATE_SET = {solved_code}
-                    else:
-                        stop_script(f"API result verification failed.", details=f"API Code: {solved_code}")
-                        return
-                else:
-                    stop_script("2Captcha API failed.", details="API call failed or returned no code.")
-                    return
+            time.sleep(delay)
+            captcha_found.clear()
 
         else:
-            # --- DEFINITIVE CLEARING LOGIC ---
-            if not captcha_found.is_set() and LAST_CANDIDATE_SET:
-                log_event("INFO", "check_loop", "Captcha code vanished from screen. Clearing cache.")
-                LAST_CANDIDATE_SET = set()
+            if captcha_found.is_set():
+                captcha_found.clear()
 
     log_event("INFO", "check_loop", "Thread stopped.")
 
@@ -522,16 +402,8 @@ def test_scan_for_captcha():
     print(raw_text)
     print("----------------------")
 
-    primary_match = re.search(r'Code:\s*([A-Za-z0-9]+)', raw_text)
-
-    if primary_match:
-        captcha_code = primary_match.group(1).strip()
-        candidates = generate_candidates(captcha_code)
-
-        print("\n==================================")
-        print(f"OCR Result: **{captcha_code}**")
-        print(f"Fuzzy Candidates: {len(candidates) - 1}")
-        print("==================================")
+    if "anti-bot" in raw_text.lower():
+        print("Detected 'Anti-bot' string during test scan. Script will use 2Captcha for resolution.")
 
     if solver is None:
         print("ERROR: 2Captcha solver is not initialized. Cannot test API.")
@@ -552,7 +424,8 @@ def start_script():
     global running
     global fish_thread
     global check_thread
-    global LAST_CANDIDATE_SET
+    global LAST_SOLVED_CODE
+    global ANTI_BOT_DISABLED_UNTIL
 
     if running:
         print("Script is already running.")
@@ -560,7 +433,9 @@ def start_script():
 
     running = True
     captcha_found.clear()
-    LAST_CANDIDATE_SET = set()
+    LAST_SOLVED_CODE = None
+    ANTI_BOT_DISABLED_UNTIL = 0.0
+    LAST_SUPPRESSION_LOG = 0.0
     log_event("START", "start_script", "Bot threads initialized and started.")
 
     print("\n--- Starting Bot (Press F9 to stop) ---")
