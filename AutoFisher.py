@@ -555,7 +555,7 @@ class BotControlGUI(tk.Tk):
         super().__init__()
 
         self.title("Discord Fishing Bot Control Panel")
-        self.geometry("460x280")
+        self.geometry("460x360")
         self.resizable(False, False)
         self.configure(bg="#1f2933")
 
