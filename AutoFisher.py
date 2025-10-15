@@ -11,6 +11,8 @@ import os
 from twocaptcha import TwoCaptcha
 from twocaptcha import ApiException
 from src.CooldownGenerator.cooldown_humanizer import HumanCooldown
+import tkinter as tk
+from tkinter import ttk
 
 # =====================================================================
 # --- 1. CONFIGURATION ---
@@ -50,6 +52,7 @@ fish_thread = None
 check_thread = None
 solver = None
 captcha_found = threading.Event()
+paused = threading.Event()
 TERMINATION_REASON = "Script manually started/stopped."
 LAST_SOLVED_CODE = None
 ANTI_BOT_DISABLED_UNTIL = 0.0
@@ -110,8 +113,8 @@ def log_termination(reason, details=""):
     print(f"\n[LOGGER] Termination reason saved to {LOG_FILE}.")
 
 
-def stop_script(reason="Unknown Error", details=""):
-    """Gracefully stops all loops, logs the reason, and exits the program."""
+def stop_script(reason="Unknown Error", details="", exit_program=False):
+    """Gracefully stops all loops, logs the reason, and optionally exits the program."""
     global running
     global TERMINATION_REASON
 
@@ -122,16 +125,76 @@ def stop_script(reason="Unknown Error", details=""):
     TERMINATION_REASON = reason
     print(f"\n--- Stopping Bot ({reason}) ---\n")
     running = False
+    paused.clear()
     captcha_found.set()  # Release any waiting threads
 
     time.sleep(1)
     log_termination(TERMINATION_REASON, details)
-    sys.exit(0)
+
+    if exit_program:
+        sys.exit(0)
 
 
 # =====================================================================
 # --- 4. CORE UTILITY FUNCTIONS ---
 # =====================================================================
+
+
+def pause_script():
+    """Pauses the fish and check loops without terminating them."""
+    if not running:
+        print("Cannot pause: script is not running.")
+        return
+
+    if paused.is_set():
+        print("Script is already paused.")
+        return
+
+    paused.set()
+    log_event("PAUSE", "pause_script", "Bot execution paused by user.")
+
+
+def resume_script():
+    """Resumes the fish and check loops after a pause."""
+    if not running:
+        print("Cannot resume: script is not running.")
+        return
+
+    if not paused.is_set():
+        print("Script is not paused.")
+        return
+
+    paused.clear()
+    log_event("RESUME", "resume_script", "Bot execution resumed by user.")
+
+
+def update_base_cooldown(new_base):
+    """Updates the base cooldown at runtime and refreshes the cooldown generator."""
+    global BASE_SLEEP
+    global humanizedCooldown
+
+    try:
+        new_value = float(new_base)
+    except (TypeError, ValueError):
+        print("Invalid cooldown value. Please provide a numeric input.")
+        return False
+
+    if new_value <= 0:
+        print("Cooldown value must be greater than zero.")
+        return False
+
+    BASE_SLEEP = new_value
+
+    try:
+        humanizedCooldown.retune_base(new_value)
+    except AttributeError:
+        humanizedCooldown.base = new_value
+    except ValueError as exc:
+        print(f"Cooldown update error: {exc}")
+        return False
+
+    log_event("CONFIG", "update_base_cooldown", f"Base cooldown adjusted to {new_value:.2f}s.")
+    return True
 
 def save_screenshot(filename):
     """Captures and saves a screenshot of the CAPTURE_AREA to the specified filename."""
@@ -279,6 +342,13 @@ def fish_loop():
     global humanizedCooldown
 
     while running:
+        if paused.is_set():
+            log_event("INFO", "fish_loop", "Paused. Waiting to resume.")
+            while paused.is_set() and running:
+                time.sleep(0.2)
+            if not running:
+                break
+
         if not captcha_found.is_set():
             log_event("COMMAND", "fish_loop", "Executing /fish command.")
 
@@ -304,6 +374,10 @@ def check_loop():
     global LAST_SUPPRESSION_LOG
 
     while running:
+        if paused.is_set():
+            time.sleep(0.5)
+            continue
+
         time.sleep(1)
 
         img = save_screenshot("current_screen_check.png")  # Capture screen for OCR
@@ -342,17 +416,17 @@ def check_loop():
 
             last_img_path = save_last_captcha_image()
             if last_img_path is None:
-                stop_script("Failed to capture captcha image.", details="Screenshot capture failed.")
+                stop_script("Failed to capture captcha image.", details="Screenshot capture failed.", exit_program=True)
                 return
 
             solved_code = api_solve_captcha(last_img_path)
 
             if not solved_code:
-                stop_script("2Captcha API failed.", details="API call failed or returned no code.")
+                stop_script("2Captcha API failed.", details="API call failed or returned no code.", exit_program=True)
                 return
 
             if not verify_api_response_timing(solved_code):
-                stop_script("API result verification failed.", details=f"API Code: {solved_code}")
+                stop_script("API result verification failed.", details=f"API Code: {solved_code}", exit_program=True)
                 return
 
             LAST_SOLVED_CODE = solved_code
@@ -432,6 +506,7 @@ def start_script():
         return
 
     running = True
+    paused.clear()
     captcha_found.clear()
     LAST_SOLVED_CODE = None
     ANTI_BOT_DISABLED_UNTIL = 0.0
@@ -476,6 +551,306 @@ def listen_for_f_keys():
         listener.join()
 
 
+class BotControlGUI(tk.Tk):
+    """Graphical control panel for managing the fishing bot."""
+
+    def __init__(self):
+        super().__init__()
+
+        # --- Window chrome / overlay behavior ---
+        self.overrideredirect(True)
+        self.wm_attributes("-topmost", True)
+        self.wm_attributes("-alpha", 0.92)
+        self.configure(bg="#111827")
+        self.geometry("420x260")
+        self.resizable(False, False)
+
+        self.after(50, self.release_focus)
+
+        self._drag_offset = (0, 0)
+        self._scale_commit_job = None
+
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure("TFrame", background="#111827")
+        style.configure("Overlay.TFrame", background="#1f2933")
+        style.configure("OverlayAccent.TFrame", background="#111827")
+        style.configure("Title.TLabel", background="#111827", foreground="#f5f7fa", font=("Segoe UI", 13, "bold"))
+        style.configure("Status.TLabel", background="#1f2933", foreground="#e4e8f0", font=("Segoe UI", 12, "bold"))
+        style.configure("Detail.TLabel", background="#1f2933", foreground="#cbd2d9", font=("Segoe UI", 10))
+        style.configure(
+            "Control.TButton",
+            font=("Segoe UI", 10, "bold"),
+            padding=(10, 6),
+            background="#334155",
+            foreground="#f5f7fa",
+        )
+        style.map(
+            "Control.TButton",
+            background=[("active", "#3e4c59"), ("!active", "#334155")],
+            foreground=[("disabled", "#7b8794"), ("!disabled", "#f5f7fa")],
+        )
+        style.configure(
+            "Accent.TButton",
+            font=("Segoe UI", 10, "bold"),
+            padding=(10, 6),
+            background="#2563eb",
+            foreground="#f5f7fa",
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#1d4ed8"), ("!active", "#2563eb")],
+            foreground=[("disabled", "#9aa5b1"), ("!disabled", "#f5f7fa")],
+        )
+
+        chrome = ttk.Frame(self, style="OverlayAccent.TFrame", padding=(12, 8))
+        chrome.pack(fill=tk.X)
+
+        title = ttk.Label(chrome, text="Fishing Bot Overlay", style="Title.TLabel")
+        title.pack(side=tk.LEFT)
+
+        close_btn = ttk.Button(
+            chrome,
+            text="✕",
+            width=3,
+            style="Control.TButton",
+            command=self.close_overlay,
+        )
+        close_btn.pack(side=tk.RIGHT)
+
+        chrome.bind("<ButtonPress-1>", self.start_move)
+        chrome.bind("<B1-Motion>", self.do_move)
+        chrome.bind("<ButtonRelease-1>", self.stop_move)
+        title.bind("<ButtonPress-1>", self.start_move)
+        title.bind("<B1-Motion>", self.do_move)
+        title.bind("<ButtonRelease-1>", self.stop_move)
+
+        body = ttk.Frame(self, style="Overlay.TFrame", padding=15)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        status_frame = ttk.Frame(body, style="Overlay.TFrame", padding=10)
+        status_frame.pack(fill=tk.X)
+
+        self.status_var = tk.StringVar(value="Status: Idle")
+        ttk.Label(status_frame, textvariable=self.status_var, style="Status.TLabel").pack(anchor=tk.W)
+
+        self.detail_var = tk.StringVar(value=f"Base cooldown: {BASE_SLEEP:.2f}s")
+        ttk.Label(status_frame, textvariable=self.detail_var, style="Detail.TLabel").pack(anchor=tk.W, pady=(4, 0))
+
+        self.feedback_var = tk.StringVar(value="")
+        self.feedback_label = ttk.Label(status_frame, textvariable=self.feedback_var, style="Detail.TLabel")
+        self.feedback_label.pack(anchor=tk.W, pady=(4, 0))
+
+        button_frame = ttk.Frame(body, style="Overlay.TFrame")
+        button_frame.pack(fill=tk.X, pady=(12, 4))
+
+        self.start_button = ttk.Button(
+            button_frame,
+            text="Start",
+            style="Accent.TButton",
+            command=self.handle_start,
+        )
+        self.start_button.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
+
+        self.pause_button = ttk.Button(
+            button_frame,
+            text="Pause",
+            style="Control.TButton",
+            command=self.toggle_pause,
+        )
+        self.pause_button.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+
+        self.stop_button = ttk.Button(
+            button_frame,
+            text="Stop",
+            style="Control.TButton",
+            command=self.handle_stop,
+        )
+        self.stop_button.grid(row=0, column=2, padx=4, pady=4, sticky="ew")
+
+        button_frame.columnconfigure((0, 1, 2), weight=1)
+
+        cooldown_frame = ttk.Frame(body, style="Overlay.TFrame", padding=(0, 8, 0, 0))
+        cooldown_frame.pack(fill=tk.X)
+
+        ttk.Label(cooldown_frame, text="Cooldown (seconds)", style="Detail.TLabel").grid(row=0, column=0, sticky="w")
+
+        self.cooldown_value = tk.DoubleVar(value=BASE_SLEEP)
+        self.cooldown_entry_var = tk.StringVar(value=f"{BASE_SLEEP:.2f}")
+
+        self.cooldown_entry = ttk.Entry(cooldown_frame, textvariable=self.cooldown_entry_var, font=("Segoe UI", 10))
+        self.cooldown_entry.grid(row=0, column=1, padx=(8, 4), sticky="ew")
+        self.cooldown_entry.bind("<Return>", self.apply_cooldown)
+        self.cooldown_entry.bind("<FocusOut>", self.apply_cooldown)
+
+        self.cooldown_apply = ttk.Button(
+            cooldown_frame,
+            text="Set",
+            style="Control.TButton",
+            command=self.apply_cooldown,
+        )
+        self.cooldown_apply.grid(row=0, column=2, padx=(4, 0))
+
+        self.cooldown_scale = ttk.Scale(
+            cooldown_frame,
+            variable=self.cooldown_value,
+            from_=0.2,
+            to=30.0,
+            orient=tk.HORIZONTAL,
+            command=self.on_cooldown_scale,
+        )
+        self.cooldown_scale.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+
+        cooldown_frame.columnconfigure(1, weight=1)
+
+        self.start_button.state(["!disabled"])
+        self.pause_button.state(["disabled"])
+        self.stop_button.state(["disabled"])
+
+        self.after(250, self.poll_state)
+
+    def handle_start(self):
+        if solver is None:
+            self.show_feedback("2Captcha solver not initialized.")
+            return
+
+        start_script()
+        self.show_feedback("Bot started.")
+        self.release_focus()
+        self.poll_state(force=True)
+
+    def handle_stop(self):
+        if running:
+            stop_script("Script stopped via overlay.")
+            self.show_feedback("Bot stopped.")
+        else:
+            self.show_feedback("Bot already stopped.")
+        self.release_focus()
+        self.poll_state(force=True)
+
+    def toggle_pause(self):
+        if not running:
+            self.show_feedback("Start the bot before pausing.")
+            return
+
+        if paused.is_set():
+            resume_script()
+            self.show_feedback("Resumed.")
+        else:
+            pause_script()
+            self.show_feedback("Paused.")
+        self.release_focus()
+        self.poll_state(force=True)
+
+    def apply_cooldown(self, event=None):
+        value = self.cooldown_entry_var.get()
+        if update_base_cooldown(value):
+            self.cooldown_entry_var.set(f"{BASE_SLEEP:.2f}")
+            self.cooldown_value.set(BASE_SLEEP)
+            self.detail_var.set(f"Base cooldown: {BASE_SLEEP:.2f}s")
+            self.show_feedback(f"Cooldown set to {BASE_SLEEP:.2f}s")
+        else:
+            self.cooldown_entry_var.set(f"{BASE_SLEEP:.2f}")
+            self.show_feedback("Enter a positive number.")
+
+        if event is None or getattr(event, "keysym", "") == "Return":
+            self.release_focus()
+
+        if event is not None and getattr(event, "keysym", "") == "Return":
+            return "break"
+
+    def on_cooldown_scale(self, value):
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return
+
+        self.cooldown_entry_var.set(f"{numeric_value:.2f}")
+
+        if self._scale_commit_job:
+            self.after_cancel(self._scale_commit_job)
+        self._scale_commit_job = self.after(150, self.commit_scale_value)
+
+    def commit_scale_value(self):
+        self._scale_commit_job = None
+        value = self.cooldown_value.get()
+        if update_base_cooldown(value):
+            self.cooldown_entry_var.set(f"{BASE_SLEEP:.2f}")
+            self.detail_var.set(f"Base cooldown: {BASE_SLEEP:.2f}s")
+            self.show_feedback(f"Cooldown set to {BASE_SLEEP:.2f}s")
+            self.release_focus()
+
+    def show_feedback(self, message, duration=2500):
+        self.feedback_var.set(message)
+        if hasattr(self, "_feedback_job") and self._feedback_job is not None:
+            self.after_cancel(self._feedback_job)
+        self._feedback_job = self.after(duration, self.clear_feedback)
+
+    def clear_feedback(self):
+        self.feedback_var.set("")
+        self._feedback_job = None
+
+    def start_move(self, event):
+        self._drag_offset = (event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty())
+
+    def stop_move(self, _event):
+        self._drag_offset = (0, 0)
+
+    def do_move(self, event):
+        if self._drag_offset == (0, 0):
+            return
+        x = event.x_root - self._drag_offset[0]
+        y = event.y_root - self._drag_offset[1]
+        self.geometry(f"+{x}+{y}")
+
+    def close_overlay(self):
+        if running:
+            stop_script("Overlay closed by user.")
+        self.destroy()
+
+    def poll_state(self, force=False):
+        state_text = "Idle"
+        if running:
+            state_text = "Paused" if paused.is_set() else "Running"
+        self.status_var.set(f"Status: {state_text}")
+
+        if self.cooldown_entry.focus_get() is not self.cooldown_entry or force:
+            self.cooldown_entry_var.set(f"{BASE_SLEEP:.2f}")
+            self.cooldown_value.set(BASE_SLEEP)
+
+        self.detail_var.set(f"Base cooldown: {BASE_SLEEP:.2f}s")
+
+        if running:
+            self.start_button.state(["disabled"])
+            self.stop_button.state(["!disabled"])
+            self.pause_button.state(["!disabled"])
+            self.pause_button.configure(text="Resume" if paused.is_set() else "Pause")
+        else:
+            self.start_button.state(["!disabled"])
+            self.stop_button.state(["disabled"])
+            self.pause_button.state(["disabled"])
+            self.pause_button.configure(text="Pause")
+
+        self.after(250, self.poll_state)
+
+    def release_focus(self):
+        if not self.winfo_exists():
+            return
+
+        def _drop_focus():
+            if not self.winfo_exists():
+                return
+            try:
+                self.tk.call("focus", "none")
+            except tk.TclError:
+                pass
+
+        self.after(60, _drop_focus)
+
 if __name__ == "__main__":
     # Initialize the unique log file name on script start
     current_date = datetime.now().strftime('%Y%m%d')
@@ -493,4 +868,9 @@ if __name__ == "__main__":
         print(f"!!! CRITICAL: Failed to initialize 2Captcha solver: {e} !!!")
         solver = None
 
-    listen_for_f_keys()
+    gui = BotControlGUI()
+
+    listener_thread = threading.Thread(target=listen_for_f_keys, daemon=True)
+    listener_thread.start()
+
+    gui.mainloop()

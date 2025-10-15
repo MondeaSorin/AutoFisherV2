@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import random
-from math import exp
+from math import exp, log
 
 from .seed_utils import derive_seed, bump_seed
 
@@ -99,6 +99,17 @@ class HumanCooldown:
         self._ou = 0.0
         self._warmup_left = 0
 
+        # Baseline ratios so we can retune the generator around a new base at runtime
+        self._design_base = base if base > 0 else 1.0
+        self._design_min_clip_factor = min_clip / self._design_base
+        self._design_max_clip_factor = max_clip / self._design_base
+        self._design_micro_min_factor = micro_min / self._design_base
+        self._design_micro_max_factor = micro_max / self._design_base
+        self._design_short_break_factor = tuple(v / self._design_base for v in short_break_s)
+        self._design_long_break_factor = tuple(v / self._design_base for v in long_break_s)
+        self._design_warmup_bias_factor = warmup_bias / self._design_base
+        self._design_slip_mu_ln = slip_mu_ln
+
     # --- internals ---
 
     def _rekey(self, n: int):
@@ -188,6 +199,28 @@ class HumanCooldown:
 
         # 8) Guard
         return max(0.8, total)
+
+    # --- configuration helpers ---
+
+    def retune_base(self, base: float) -> None:
+        """Re-centre the stochastic model around a new base interval."""
+
+        if base <= 0:
+            raise ValueError("HumanCooldown base must be positive.")
+
+        scale = base / self._design_base if self._design_base > 0 else 1.0
+
+        self.base = base
+        self.min_clip = max(0.1, base * self._design_min_clip_factor)
+        self.max_clip = max(self.min_clip + 0.1, base * self._design_max_clip_factor)
+        self.micro_min = max(0.01, base * self._design_micro_min_factor)
+        self.micro_max = max(self.micro_min + 0.01, base * self._design_micro_max_factor)
+        self.short_break_s = tuple(max(1.0, base * f) for f in self._design_short_break_factor)
+        self.long_break_s = tuple(max(5.0, base * f) for f in self._design_long_break_factor)
+        self.warmup_bias = self._design_warmup_bias_factor * base
+
+        if scale > 0:
+            self.slip_mu_ln = self._design_slip_mu_ln + log(scale)
 
 
 # Optional convenience singleton-style API
