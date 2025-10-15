@@ -29,10 +29,10 @@ API_KEY = os.getenv('APIKEY_2CAPTCHA', '6840474409ea1ab7504ed66ea906ba7d')
 
 # SCREEN CAPTURE AREA (Must be defined to capture the chat window containing the CAPTCHA)
 CAPTURE_AREA = {
-    'left': 650,  # X-coordinate of the left edge
+    'left': 350,  # X-coordinate of the left edge
     'top': 150,  # Y-coordinate of the top edge
     'width': 600,  # Width of the area
-    'height': 750  # Height of the area
+    'height': 860  # Height of the area
 }
 
 # TESSERACT CONFIG
@@ -376,7 +376,6 @@ def check_loop():
             continue
 
         time.sleep(1)
-
         img = save_screenshot("current_screen_check.png")  # Capture screen for OCR
         if img is None:
             continue
@@ -385,8 +384,7 @@ def check_loop():
         raw_text_lower = raw_text.lower()
 
         # Log periodic status for diagnostic purposes
-        if time.time() % 30 < 1:
-            log_event("INFO", "check_loop", "Screen scan (periodic check).", raw_text)
+        log_event("INFO", "check_loop", "Screen scan (periodic check).", raw_text)
 
         # --- CAPTCHA DETECTION FLOW ---
 
