@@ -613,6 +613,36 @@ class BotControlGUI(tk.Tk):
         detail_label = ttk.Label(status_frame, textvariable=self.detail_var, style="Detail.TLabel")
         detail_label.pack(anchor=tk.W, pady=(5, 0))
 
+        cooldown_control = ttk.Frame(status_frame, style="Card.TFrame")
+        cooldown_control.pack(fill=tk.X, pady=(10, 0))
+
+        cooldown_label = ttk.Label(
+            cooldown_control,
+            text="Adjust base cooldown (seconds):",
+            style="Detail.TLabel",
+        )
+        cooldown_label.grid(row=0, column=0, sticky="w")
+
+        self.cooldown_var = tk.StringVar(value=f"{BASE_SLEEP:.2f}")
+        self.cooldown_entry = ttk.Entry(
+            cooldown_control,
+            textvariable=self.cooldown_var,
+            font=("Segoe UI", 11),
+        )
+        self.cooldown_entry.grid(row=0, column=1, padx=10, sticky="ew")
+        self.cooldown_entry.bind("<Return>", lambda _event: self.apply_cooldown())
+
+        self.cooldown_apply = ttk.Button(
+            cooldown_control,
+            text="Apply",
+            style="Control.TButton",
+            command=self.apply_cooldown,
+            width=10,
+        )
+        self.cooldown_apply.grid(row=0, column=2, padx=5, sticky="ew")
+
+        cooldown_control.columnconfigure(1, weight=1)
+
         button_frame = ttk.Frame(main_frame, padding=(0, 5))
         button_frame.pack(fill=tk.X)
 
@@ -648,31 +678,6 @@ class BotControlGUI(tk.Tk):
         self.start_button.state(["!disabled"])
         self.pause_button.state(["disabled"])
         self.stop_button.state(["disabled"])
-
-        cooldown_frame = ttk.LabelFrame(main_frame, text="Cooldown Settings", style="Card.TLabelframe", padding=15)
-        cooldown_frame.pack(fill=tk.X, pady=(15, 0))
-
-        cooldown_label = ttk.Label(
-            cooldown_frame,
-            text="Base cooldown (seconds):",
-            style="Detail.TLabel",
-        )
-        cooldown_label.grid(row=0, column=0, sticky="w")
-
-        self.cooldown_var = tk.StringVar(value=f"{BASE_SLEEP:.2f}")
-        self.cooldown_entry = ttk.Entry(cooldown_frame, textvariable=self.cooldown_var, font=("Segoe UI", 11))
-        self.cooldown_entry.grid(row=0, column=1, padx=10, sticky="ew")
-
-        self.cooldown_apply = ttk.Button(
-            cooldown_frame,
-            text="Apply",
-            style="Control.TButton",
-            command=self.apply_cooldown,
-            width=10,
-        )
-        self.cooldown_apply.grid(row=0, column=2, padx=5)
-
-        cooldown_frame.columnconfigure(1, weight=1)
 
         self.after(250, self.poll_state)
 
