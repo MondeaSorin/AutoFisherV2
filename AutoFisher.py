@@ -9,6 +9,7 @@ from datetime import datetime
 import threading
 import sys
 import os
+import re
 from src.CooldownGenerator.cooldown_humanizer import HumanCooldown
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -322,6 +323,16 @@ def detect_captcha_region(img):
     if not target_indices:
         return None
 
+    code_crop = find_code_crop(ocr_data, img.size)
+    if code_crop:
+        log_event(
+            "INFO",
+            "detect_captcha_region",
+            "Detected captcha code bounds via 'Code:' anchor.",
+            ocr_text=f"Code crop: left={code_crop[0]}, top={code_crop[1]}, right={code_crop[2]}, bottom={code_crop[3]}"
+        )
+        return code_crop
+
     # Use the widest detection of "anti-bot" as the anchor to reduce OCR noise.
     anchor_idx = max(target_indices, key=lambda i: ocr_data["width"][i])
     anchor_left = ocr_data["left"][anchor_idx]
@@ -379,6 +390,84 @@ def clamp_crop_box(box, img_size):
         return None
 
     return (left, top, right, bottom)
+
+
+def find_code_crop(ocr_data, img_size):
+    """Attempts to locate and crop only the captcha code following a detected 'Code:' label."""
+    text_entries = ocr_data.get("text", [])
+    if not text_entries:
+        return None
+
+    entry_count = len(text_entries)
+    width, height = img_size
+
+    for idx in range(entry_count):
+        raw_text = text_entries[idx]
+        if not raw_text or not raw_text.strip():
+            continue
+
+        cleaned = raw_text.strip()
+        lowered = cleaned.lower()
+        if not lowered.startswith("code"):
+            continue
+
+        base_left = ocr_data["left"][idx]
+        base_top = ocr_data["top"][idx]
+        base_width = ocr_data["width"][idx]
+        base_height = ocr_data["height"][idx]
+        base_right = base_left + base_width
+
+        page_num = ocr_data.get("page_num", [None])[idx]
+        block_num = ocr_data.get("block_num", [None])[idx]
+        par_num = ocr_data.get("par_num", [None])[idx]
+        line_num = ocr_data.get("line_num", [None])[idx]
+
+        candidate_indices = []
+        for j in range(entry_count):
+            if j == idx:
+                continue
+
+            comparison_text = text_entries[j]
+            if not comparison_text or not comparison_text.strip():
+                continue
+
+            if (
+                ocr_data.get("page_num", [None])[j] != page_num
+                or ocr_data.get("block_num", [None])[j] != block_num
+                or ocr_data.get("par_num", [None])[j] != par_num
+                or ocr_data.get("line_num", [None])[j] != line_num
+            ):
+                continue
+
+            comparison_left = ocr_data["left"][j]
+            if comparison_left < base_right - 3:  # Must appear to the right of the label.
+                continue
+
+            if not re.search(r"[A-Za-z0-9]", comparison_text):
+                continue
+
+            candidate_indices.append(j)
+
+        if not candidate_indices:
+            continue
+
+        min_left = min(ocr_data["left"][j] for j in candidate_indices)
+        min_top = min(ocr_data["top"][j] for j in candidate_indices)
+        max_right = max(ocr_data["left"][j] + ocr_data["width"][j] for j in candidate_indices)
+        max_bottom = max(ocr_data["top"][j] + ocr_data["height"][j] for j in candidate_indices)
+
+        padding = 4
+        left = max(0, min_left - padding)
+        top = max(0, min_top - padding)
+        right = min(width, max_right + padding)
+        bottom = min(height, max_bottom + padding)
+
+        if left >= right or top >= bottom:
+            continue
+
+        return (int(left), int(top), int(right), int(bottom))
+
+    return None
 
 
 def crop_captcha_image(img):
@@ -563,6 +652,14 @@ def check_loop():
         log_event("INFO", "check_loop", "Screen scan (periodic check).", raw_text)
 
         # --- CAPTCHA DETECTION FLOW ---
+
+        if "solve the captcha posted above" in raw_text_lower:
+            stop_script(
+                "Emergency captcha escalation detected.",
+                details="Encountered instruction to solve the captcha posted above.",
+                exit_program=True,
+            )
+            return
 
         if "anti-bot" in raw_text_lower:
             current_time = time.time()
