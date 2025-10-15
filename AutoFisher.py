@@ -31,14 +31,6 @@ CAPTURE_AREA = {
     'height': 860  # Height of the area
 }
 
-# CAPTCHA IMAGE CROPPING (adjust if your Discord layout differs)
-CAPTCHA_CROP_BOX = (
-    320,  # Left pixel inside the captured area
-    420,  # Top pixel inside the captured area
-    480,  # Right pixel inside the captured area
-    610   # Bottom pixel inside the captured area
-)
-
 # CAPTCHA ANCHOR OFFSETS (relative to the detected 'anti-bot' text)
 CAPTCHA_ANCHOR_VERTICAL_OFFSET = 117   # Pixels below the bottom of the anchor to begin the crop
 CAPTCHA_ANCHOR_HORIZONTAL_ADJUST = 42  # Horizontal adjustment from the anchor center
@@ -248,32 +240,32 @@ def save_last_captcha_image(filename="api_captcha_current.png"):
 
     cropped_img = crop_captcha_image(img)
 
-    if cropped_img is not None:
-        cropped_snapshot_path = os.path.join(CAPTCHA_CROPPED_DIR, f"captcha_{timestamp}.png")
-        try:
-            cropped_img.save(cropped_snapshot_path)
-        except Exception as e:
-            log_event("ERROR", "save_last_captcha_image", f"Failed to save cropped captcha snapshot: {e}")
-
-        try:
-            cropped_img.save(api_output_path)
-        except Exception as e:
-            log_event("ERROR", "save_last_captcha_image", f"Failed to update API captcha image: {e}")
-            return None
-
+    if cropped_img is None:
         log_event(
-            "INFO",
+            "ERROR",
             "save_last_captcha_image",
-            "Saved latest captcha image (full & cropped).",
-            ocr_text=f"Full: {full_snapshot_path}\nCropped: {cropped_snapshot_path}"
+            "Failed to derive captcha crop from screenshot."
         )
-        return api_output_path
+        return None
+
+    cropped_snapshot_path = os.path.join(CAPTCHA_CROPPED_DIR, f"captcha_{timestamp}.png")
+    try:
+        cropped_img.save(cropped_snapshot_path)
+    except Exception as e:
+        log_event("ERROR", "save_last_captcha_image", f"Failed to save cropped captcha snapshot: {e}")
+        return None
+
+    try:
+        cropped_img.save(api_output_path)
+    except Exception as e:
+        log_event("ERROR", "save_last_captcha_image", f"Failed to update API captcha image: {e}")
+        return None
 
     log_event(
-        "WARNING",
+        "INFO",
         "save_last_captcha_image",
-        "Cropping failed. Using uncropped screenshot for API submission.",
-        ocr_text=f"Full: {full_snapshot_path}"
+        "Saved latest captcha image (full & cropped).",
+        ocr_text=f"Full: {full_snapshot_path}\nCropped: {cropped_snapshot_path}"
     )
     return api_output_path
 
@@ -390,32 +382,21 @@ def clamp_crop_box(box, img_size):
 
 
 def crop_captcha_image(img):
-    """Crops the captcha image using detected bounds, falling back to configuration."""
+    """Crops the captcha image using detected bounds; failure halts downstream flow."""
     try:
         detected_box = detect_captcha_region(img)
 
-        if detected_box:
-            log_event(
-                "INFO",
-                "crop_captcha_image",
-                "Detected captcha bounds via OCR search.",
-                ocr_text=str(detected_box)
-            )
-            return img.crop(detected_box)
-
-        fallback_box = clamp_crop_box(CAPTCHA_CROP_BOX, img.size)
-
-        if fallback_box is None:
-            log_event("ERROR", "crop_captcha_image", "Fallback crop box is invalid.")
+        if not detected_box:
+            log_event("ERROR", "crop_captcha_image", "Captcha bounds detection failed. No crop available.")
             return None
 
         log_event(
-            "WARNING",
+            "INFO",
             "crop_captcha_image",
-            "Captcha bounds detection failed. Using configured fallback box.",
-            ocr_text=str(fallback_box)
+            "Detected captcha bounds via OCR search.",
+            ocr_text=str(detected_box)
         )
-        return img.crop(fallback_box)
+        return img.crop(detected_box)
 
     except Exception as e:
         log_event("ERROR", "crop_captcha_image", f"Failed to crop captcha image: {e}")
@@ -606,7 +587,7 @@ def check_loop():
 
             last_img_path = save_last_captcha_image()
             if last_img_path is None:
-                stop_script("Failed to capture captcha image.", details="Screenshot capture failed.", exit_program=True)
+                stop_script("Failed to prepare captcha crop.", details="OCR-based detection did not produce bounds.", exit_program=True)
                 return
 
             solved_code = api_solve_captcha(last_img_path)
