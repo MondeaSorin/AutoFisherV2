@@ -12,7 +12,7 @@ import os
 from src.CooldownGenerator.cooldown_humanizer import HumanCooldown
 import tkinter as tk
 from tkinter import ttk, messagebox
-from anticaptchaofficial.imagecaptcha import *
+from anticaptchaofficial.imagecaptcha import imagecaptcha
 
 # =====================================================================
 # --- 1. CONFIGURATION ---
@@ -30,14 +30,6 @@ CAPTURE_AREA = {
     'width': 600,  # Width of the area
     'height': 860  # Height of the area
 }
-
-# CAPTCHA IMAGE CROPPING (adjust if your Discord layout differs)
-CAPTCHA_CROP_BOX = (
-    320,  # Left pixel inside the captured area
-    420,  # Top pixel inside the captured area
-    480,  # Right pixel inside the captured area
-    610   # Bottom pixel inside the captured area
-)
 
 # CAPTCHA ANCHOR OFFSETS (relative to the detected 'anti-bot' text)
 CAPTCHA_ANCHOR_VERTICAL_OFFSET = 117   # Pixels below the bottom of the anchor to begin the crop
@@ -248,34 +240,64 @@ def save_last_captcha_image(filename="api_captcha_current.png"):
 
     cropped_img = crop_captcha_image(img)
 
-    if cropped_img is not None:
-        cropped_snapshot_path = os.path.join(CAPTCHA_CROPPED_DIR, f"captcha_{timestamp}.png")
-        try:
-            cropped_img.save(cropped_snapshot_path)
-        except Exception as e:
-            log_event("ERROR", "save_last_captcha_image", f"Failed to save cropped captcha snapshot: {e}")
-
-        try:
-            cropped_img.save(api_output_path)
-        except Exception as e:
-            log_event("ERROR", "save_last_captcha_image", f"Failed to update API captcha image: {e}")
-            return None
-
+    if cropped_img is None:
         log_event(
-            "INFO",
+            "ERROR",
             "save_last_captcha_image",
-            "Saved latest captcha image (full & cropped).",
-            ocr_text=f"Full: {full_snapshot_path}\nCropped: {cropped_snapshot_path}"
+            "Failed to derive captcha crop from screenshot."
         )
-        return api_output_path
+        return None
+
+    cropped_snapshot_path = os.path.join(CAPTCHA_CROPPED_DIR, f"captcha_{timestamp}.png")
+    try:
+        cropped_img.save(cropped_snapshot_path)
+    except Exception as e:
+        log_event("ERROR", "save_last_captcha_image", f"Failed to save cropped captcha snapshot: {e}")
+        return None
+
+    try:
+        cropped_img.save(api_output_path)
+    except Exception as e:
+        log_event("ERROR", "save_last_captcha_image", f"Failed to update API captcha image: {e}")
+        return None
 
     log_event(
-        "WARNING",
+        "INFO",
         "save_last_captcha_image",
-        "Cropping failed. Using uncropped screenshot for API submission.",
-        ocr_text=f"Full: {full_snapshot_path}"
+        "Saved latest captcha image (full & cropped).",
+        ocr_text=f"Full: {full_snapshot_path}\nCropped: {cropped_snapshot_path}"
     )
     return api_output_path
+
+
+def solve_full_screenshot():
+    """Captures the full screenshot and sends it to the solver without cropping."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    try:
+        os.makedirs(CAPTCHA_STORAGE_DIR, exist_ok=True)
+    except Exception as e:
+        log_event("ERROR", "solve_full_screenshot", f"Failed to prepare captcha directory: {e}")
+
+    full_path = os.path.join(CAPTCHA_STORAGE_DIR, f"captcha_manual_full_{timestamp}.png")
+
+    img = save_screenshot(full_path)
+    if img is None:
+        log_event("ERROR", "solve_full_screenshot", "Screenshot capture returned no data.")
+        return None, None
+
+    log_event(
+        "INFO",
+        "solve_full_screenshot",
+        "Captured full screenshot for manual solver request.",
+        ocr_text=f"Saved to: {full_path}",
+    )
+
+    solved_code = api_solve_captcha(full_path)
+    if not solved_code:
+        return None, full_path
+
+    return solved_code, full_path
 
 
 def detect_captcha_region(img):
@@ -360,32 +382,21 @@ def clamp_crop_box(box, img_size):
 
 
 def crop_captcha_image(img):
-    """Crops the captcha image using detected bounds, falling back to configuration."""
+    """Crops the captcha image using detected bounds; failure halts downstream flow."""
     try:
         detected_box = detect_captcha_region(img)
 
-        if detected_box:
-            log_event(
-                "INFO",
-                "crop_captcha_image",
-                "Detected captcha bounds via OCR search.",
-                ocr_text=str(detected_box)
-            )
-            return img.crop(detected_box)
-
-        fallback_box = clamp_crop_box(CAPTCHA_CROP_BOX, img.size)
-
-        if fallback_box is None:
-            log_event("ERROR", "crop_captcha_image", "Fallback crop box is invalid.")
+        if not detected_box:
+            log_event("ERROR", "crop_captcha_image", "Captcha bounds detection failed. No crop available.")
             return None
 
         log_event(
-            "WARNING",
+            "INFO",
             "crop_captcha_image",
-            "Captcha bounds detection failed. Using configured fallback box.",
-            ocr_text=str(fallback_box)
+            "Detected captcha bounds via OCR search.",
+            ocr_text=str(detected_box)
         )
-        return img.crop(fallback_box)
+        return img.crop(detected_box)
 
     except Exception as e:
         log_event("ERROR", "crop_captcha_image", f"Failed to crop captcha image: {e}")
@@ -437,7 +448,7 @@ def api_solve_captcha(img_path):
         log_event("ERROR", "api_solve_captcha", "Solver not initialized. Cannot use API.")
         return None
 
-    log_event("API_CALL", "api_solve_captcha", f"Sending image path {img_path} to Anti-Captcha   service...")
+    log_event("API_CALL", "api_solve_captcha", f"Sending image path {img_path} to Anti-Captcha service...")
 
     result = solver.solve_and_return_solution(img_path)
     captcha_text = result
@@ -451,13 +462,13 @@ def api_solve_captcha(img_path):
     return captcha_text
 
 
-def verify_api_response_timing(code):
+def verify_solver_response_timing(code):
     """
-    Sends /verify code, then uses the complex 35s/10s timing (API Path).
+    Sends /verify code, then uses the complex 35s/10s timing (solver path).
     Returns True (success and resume) or False (stop script).
     """
 
-    log_event("COMMAND", "verify_api_response_timing", f"Inputting API result: /verify {code}")
+    log_event("COMMAND", "verify_solver_response_timing", f"Inputting solver result: /verify {code}")
     clear_input_line()
     time.sleep(0.5)
     keyboard_input("/verify")
@@ -468,28 +479,28 @@ def verify_api_response_timing(code):
     keyboard_press(keyboard.Key.enter)
 
     # --- Check 1: Wait 35 seconds ---
-    log_event("INFO", "verify_api_response_timing", "Waiting 35s for API verification result.")
+    log_event("INFO", "verify_solver_response_timing", "Waiting 35s for verification result.")
     time.sleep(35.0)
 
     for attempt in range(1, 3):
         img = save_screenshot("verification_check.png")
         raw_text = ocr_screenshot(img)
         raw_text_lower = raw_text.lower()
-        log_event("VERIFY", "verify_api_response_timing", f"Screen check {attempt} after wait.", raw_text)
+        log_event("VERIFY", "verify_solver_response_timing", f"Screen check {attempt} after wait.", raw_text)
 
         if "may now continue" in raw_text_lower:
-            log_event("SUCCESS", "verify_api_response_timing", "API code accepted. Resuming loop.")
+            log_event("SUCCESS", "verify_solver_response_timing", "Solver code accepted. Resuming loop.")
             return True
 
         elif "incorrect" in raw_text_lower:
-            log_event("FAILURE", "verify_api_response_timing", "API code was incorrect.")
+            log_event("FAILURE", "verify_solver_response_timing", "Solver code was incorrect.")
             return False
 
         if attempt == 1:
-            log_event("INFO", "verify_api_response_timing", "Result unclear. Waiting 10s more.")
+            log_event("INFO", "verify_solver_response_timing", "Result unclear. Waiting 10s more.")
             time.sleep(10.0)
         else:
-            log_event("CRITICAL", "verify_api_response_timing",
+            log_event("CRITICAL", "verify_solver_response_timing",
                       "Verification failed to get clear response after 45 seconds.")
             return False
 
@@ -576,17 +587,17 @@ def check_loop():
 
             last_img_path = save_last_captcha_image()
             if last_img_path is None:
-                stop_script("Failed to capture captcha image.", details="Screenshot capture failed.", exit_program=True)
+                stop_script("Failed to prepare captcha crop.", details="OCR-based detection did not produce bounds.", exit_program=True)
                 return
 
             solved_code = api_solve_captcha(last_img_path)
 
             if not solved_code:
-                stop_script("2Captcha API failed.", details="API call failed or returned no code.", exit_program=True)
+                stop_script("Anti-Captcha solver failed.", details="Solver call failed or returned no code.", exit_program=True)
                 return
 
-            if not verify_api_response_timing(solved_code):
-                stop_script("API result verification failed.", details=f"API Code: {solved_code}", exit_program=True)
+            if not verify_solver_response_timing(solved_code):
+                stop_script("Solver result verification failed.", details=f"Solver Code: {solved_code}", exit_program=True)
                 return
 
             LAST_SOLVED_CODE = solved_code
@@ -599,7 +610,7 @@ def check_loop():
                 "SUCCESS",
                 "check_loop",
                 (
-                    f"Captcha solved via 2Captcha ({solved_code}). Waiting {delay:.2f}s before resuming. "
+                    f"Captcha solved via Anti-Captcha ({solved_code}). Waiting {delay:.2f}s before resuming. "
                     f"Anti-bot detection disabled for {disable_minutes:.1f} minutes."
                 ),
             )
@@ -614,7 +625,7 @@ def check_loop():
     log_event("INFO", "check_loop", "Thread stopped.")
 
 def start_script():
-    """Initializes and starts both fish and check threads on F8."""
+    """Initializes and starts both fish and check threads from the GUI."""
     global running
     global fish_thread
     global check_thread
@@ -633,7 +644,7 @@ def start_script():
     LAST_SUPPRESSION_LOG = 0.0
     log_event("START", "start_script", "Bot threads initialized and started.")
 
-    print("\n--- Starting Bot (Press F9 to stop) ---")
+    print("\n--- Starting Bot ---")
 
     check_thread = threading.Thread(target=check_loop, daemon=True)
     check_thread.start()
@@ -644,29 +655,6 @@ def start_script():
     fish_thread.start()
 
     print("Bot is running. Ensure Discord is the active window.")
-
-
-def on_press(key):
-    """Handles key presses. F8 to start, F9 to stop, F10 to test scan."""
-    try:
-        if key == keyboard.Key.f8:
-            start_script()
-        elif key == keyboard.Key.f9:
-            stop_script("Script stopped manually by F9 key.")
-    except AttributeError:
-        pass
-
-
-def listen_for_f_keys():
-    """Sets up the keyboard listener for F8, F9, and F10."""
-    print("---------------------------------------")
-    print("Discord Fishing Bot v3.6 (No Suppression Logic)")
-    print("F8: START | F9: STOP | F10: TEST OCR/API")
-    print(f"Log File: {LOG_FILE}")
-    print("---------------------------------------")
-
-    with keyboard.Listener(on_press=on_press) as listener:
-        listener.join()
 
 
 class BotControlGUI(tk.Tk):
@@ -796,6 +784,17 @@ class BotControlGUI(tk.Tk):
 
         button_frame.columnconfigure((0, 1, 2), weight=1)
 
+        manual_frame = ttk.Frame(main_frame, padding=(0, 0))
+        manual_frame.pack(fill=tk.X)
+
+        self.solve_button = ttk.Button(
+            manual_frame,
+            text="Solve Current Screenshot",
+            style="Control.TButton",
+            command=self.send_full_screenshot_to_solver,
+        )
+        self.solve_button.pack(fill=tk.X, padx=5, pady=(0, 5))
+
         self.start_button.state(["!disabled"])
         self.pause_button.state(["disabled"])
         self.stop_button.state(["disabled"])
@@ -804,7 +803,7 @@ class BotControlGUI(tk.Tk):
 
     def handle_start(self):
         if solver is None:
-            messagebox.showerror("Solver not initialized", "Anti Captcha solver is not initialized. Check your API key.")
+            messagebox.showerror("Solver not initialized", "Anti-Captcha solver is not initialized. Check your API key.")
             return
 
         start_script()
@@ -836,6 +835,39 @@ class BotControlGUI(tk.Tk):
         else:
             messagebox.showerror("Invalid Value", "Please enter a numeric value greater than zero.")
             self.cooldown_var.set(f"{BASE_SLEEP:.2f}")
+
+    def send_full_screenshot_to_solver(self):
+        if solver is None:
+            messagebox.showerror("Solver not initialized", "Anti-Captcha solver is not initialized. Check your API key.")
+            return
+
+        solved_code, image_path = solve_full_screenshot()
+
+        if image_path is None:
+            messagebox.showerror(
+                "Screenshot Failed",
+                "Unable to capture the screen region. Review the logs for more information.",
+            )
+            return
+
+        if not solved_code:
+            messagebox.showerror(
+                "Solver Error",
+                (
+                    "The solver did not return a valid code.\n"
+                    f"Screenshot saved at:\n{image_path}"
+                ),
+            )
+            return
+
+        messagebox.showinfo(
+            "Solver Response",
+            (
+                "The solver returned the following code:\n"
+                f"{solved_code}\n\n"
+                f"Screenshot saved at:\n{image_path}"
+            ),
+        )
 
     def poll_state(self, force=False):
         state_text = "Idle"
@@ -883,9 +915,11 @@ if __name__ == "__main__":
         print(f"!!! CRITICAL: Failed to initialize captcha solver: {e} !!!")
         solver = None
 
+    print("---------------------------------------")
+    print("Discord Fishing Bot (GUI Control)")
+    print(f"Log File: {LOG_FILE}")
+    print("Use the GUI buttons to control the bot.")
+    print("---------------------------------------")
+
     gui = BotControlGUI()
-
-    listener_thread = threading.Thread(target=listen_for_f_keys, daemon=True)
-    listener_thread.start()
-
     gui.mainloop()
