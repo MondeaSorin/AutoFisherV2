@@ -1,6 +1,7 @@
 import mss
 from PIL import Image
 import pytesseract
+from pytesseract import Output
 from pynput import keyboard
 import random
 import time
@@ -8,6 +9,7 @@ from datetime import datetime
 import threading
 import sys
 import os
+import numpy as np
 from twocaptcha import TwoCaptcha
 from twocaptcha import ApiException
 from src.CooldownGenerator.cooldown_humanizer import HumanCooldown
@@ -34,6 +36,18 @@ CAPTURE_AREA = {
     'width': 600,  # Width of the area
     'height': 860  # Height of the area
 }
+
+# CAPTCHA IMAGE CROPPING (adjust if your Discord layout differs)
+CAPTCHA_CROP_BOX = (
+    120,  # Left pixel inside the captured area
+    420,  # Top pixel inside the captured area
+    480,  # Right pixel inside the captured area
+    610   # Bottom pixel inside the captured area
+)
+
+# CAPTCHA IMAGE STORAGE (for manual inspection and API submission)
+CAPTCHA_STORAGE_DIR = os.path.join("captchas", "full")
+CAPTCHA_CROPPED_DIR = os.path.join("captchas", "cropped")
 
 # TESSERACT CONFIG
 # **IMPORTANT**: Set the path to the Tesseract executable
@@ -209,14 +223,184 @@ def save_screenshot(filename):
 def save_last_captcha_image(filename="api_captcha_current.png"):
     """
     Saves the latest screenshot for the 2Captcha API.
-    Uses a static name to overwrite previous images.
-    Returns the file path.
+    Stores both the original capture and a cropped captcha image for review.
+    Returns the file path used for API submission (cropped image).
     """
-    img = save_screenshot(filename)
-    if img is not None:
-        log_event("INFO", "save_last_captcha_image", f"Saved latest API image to: {filename}")
-        return filename
-    return None
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    try:
+        os.makedirs(CAPTCHA_STORAGE_DIR, exist_ok=True)
+        os.makedirs(CAPTCHA_CROPPED_DIR, exist_ok=True)
+    except Exception as e:
+        log_event("ERROR", "save_last_captcha_image", f"Failed to prepare captcha directories: {e}")
+
+    api_output_path = os.path.join(CAPTCHA_CROPPED_DIR, os.path.basename(filename))
+
+    img = save_screenshot(api_output_path)
+    if img is None:
+        return None
+
+    full_snapshot_path = os.path.join(CAPTCHA_STORAGE_DIR, f"captcha_full_{timestamp}.png")
+    try:
+        img.save(full_snapshot_path)
+    except Exception as e:
+        log_event("ERROR", "save_last_captcha_image", f"Failed to archive full captcha snapshot: {e}")
+
+    cropped_img = crop_captcha_image(img)
+
+    if cropped_img is not None:
+        cropped_snapshot_path = os.path.join(CAPTCHA_CROPPED_DIR, f"captcha_{timestamp}.png")
+        try:
+            cropped_img.save(cropped_snapshot_path)
+        except Exception as e:
+            log_event("ERROR", "save_last_captcha_image", f"Failed to save cropped captcha snapshot: {e}")
+
+        try:
+            cropped_img.save(api_output_path)
+        except Exception as e:
+            log_event("ERROR", "save_last_captcha_image", f"Failed to update API captcha image: {e}")
+            return None
+
+        log_event(
+            "INFO",
+            "save_last_captcha_image",
+            "Saved latest captcha image (full & cropped).",
+            ocr_text=f"Full: {full_snapshot_path}\nCropped: {cropped_snapshot_path}"
+        )
+        return api_output_path
+
+    log_event(
+        "WARNING",
+        "save_last_captcha_image",
+        "Cropping failed. Using uncropped screenshot for API submission.",
+        ocr_text=f"Full: {full_snapshot_path}"
+    )
+    return api_output_path
+
+
+def detect_captcha_region(img):
+    """Attempts to locate the captcha image relative to the 'anti-bot' text."""
+    width, height = img.size
+
+    try:
+        ocr_data = pytesseract.image_to_data(img, output_type=Output.DICT)
+    except Exception as e:
+        log_event("ERROR", "detect_captcha_region", f"Failed to analyze screenshot text: {e}")
+        return None
+
+    if not ocr_data.get("text"):
+        return None
+
+    target_indices = []
+    for idx, text in enumerate(ocr_data["text"]):
+        cleaned = text.strip().lower()
+        if not cleaned:
+            continue
+        if "anti-bot" in cleaned:
+            target_indices.append(idx)
+
+    if not target_indices:
+        return None
+
+    # Use the widest detection of "anti-bot" as the anchor.
+    anchor_idx = max(target_indices, key=lambda i: ocr_data["width"][i])
+    anchor_left = ocr_data["left"][anchor_idx]
+    anchor_top = ocr_data["top"][anchor_idx]
+    anchor_width = ocr_data["width"][anchor_idx]
+    anchor_height = ocr_data["height"][anchor_idx]
+
+    # Define a search window beneath the anchor text.
+    horizontal_padding = int(anchor_width * 2.5)
+    vertical_padding = int(anchor_height * 0.6)
+    search_height = int(anchor_height * 6)
+
+    search_left = max(0, anchor_left - horizontal_padding // 2)
+    search_right = min(width, anchor_left + anchor_width + horizontal_padding)
+    search_top = max(0, anchor_top + anchor_height + vertical_padding)
+    search_bottom = min(height, search_top + search_height)
+
+    if search_bottom <= search_top or search_right <= search_left:
+        return None
+
+    search_region = img.crop((search_left, search_top, search_right, search_bottom)).convert("L")
+    search_array = np.array(search_region)
+
+    # Identify pixels that are not close to white (likely part of the captcha image/text).
+    mask = search_array < 245
+
+    if not mask.any():
+        return None
+
+    rows = np.where(mask.any(axis=1))[0]
+    cols = np.where(mask.any(axis=0))[0]
+
+    region_top = int(rows[0])
+    region_bottom = int(rows[-1]) + 1
+    region_left = int(cols[0])
+    region_right = int(cols[-1]) + 1
+
+    # Expand slightly to include padding around captcha borders.
+    padding_y = int(anchor_height * 0.4)
+    padding_x = int(anchor_width * 0.3)
+
+    cropped_left = max(search_left, search_left + region_left - padding_x)
+    cropped_top = max(0, search_top + region_top - padding_y)
+    cropped_right = min(width, search_left + region_right + padding_x)
+    cropped_bottom = min(height, search_top + region_bottom + padding_y)
+
+    if cropped_bottom <= cropped_top or cropped_right <= cropped_left:
+        return None
+
+    return (cropped_left, cropped_top, cropped_right, cropped_bottom)
+
+
+def clamp_crop_box(box, img_size):
+    """Clamps a crop box to the bounds of the given image size."""
+    left, top, right, bottom = box
+    width, height = img_size
+
+    left = max(0, min(int(left), width))
+    top = max(0, min(int(top), height))
+    right = max(left, min(int(right), width))
+    bottom = max(top, min(int(bottom), height))
+
+    if left == right or top == bottom:
+        return None
+
+    return (left, top, right, bottom)
+
+
+def crop_captcha_image(img):
+    """Crops the captcha image using detected bounds, falling back to configuration."""
+    try:
+        detected_box = detect_captcha_region(img)
+
+        if detected_box:
+            log_event(
+                "INFO",
+                "crop_captcha_image",
+                "Detected captcha bounds via OCR search.",
+                ocr_text=str(detected_box)
+            )
+            return img.crop(detected_box)
+
+        fallback_box = clamp_crop_box(CAPTCHA_CROP_BOX, img.size)
+
+        if fallback_box is None:
+            log_event("ERROR", "crop_captcha_image", "Fallback crop box is invalid.")
+            return None
+
+        log_event(
+            "WARNING",
+            "crop_captcha_image",
+            "Captcha bounds detection failed. Using configured fallback box.",
+            ocr_text=str(fallback_box)
+        )
+        return img.crop(fallback_box)
+
+    except Exception as e:
+        log_event("ERROR", "crop_captcha_image", f"Failed to crop captcha image: {e}")
+        return None
 
 
 def ocr_screenshot(img):
