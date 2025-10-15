@@ -184,7 +184,12 @@ def update_base_cooldown(new_base):
         return False
 
     BASE_SLEEP = new_value
-    humanizedCooldown.base = new_value
+
+    try:
+        humanizedCooldown.retune_base(new_value)
+    except AttributeError:
+        # Fallback for legacy HumanCooldown objects without retune support
+        humanizedCooldown.base = new_value
     log_event("CONFIG", "update_base_cooldown", f"Base cooldown adjusted to {new_value:.2f}s.")
     return True
 
