@@ -323,6 +323,16 @@ def detect_captcha_region(img):
     if not target_indices:
         return None
 
+    code_crop = find_code_crop(ocr_data, img.size)
+    if code_crop:
+        log_event(
+            "INFO",
+            "detect_captcha_region",
+            "Detected captcha code bounds via 'Code:' anchor.",
+            ocr_text=f"Code crop: left={code_crop[0]}, top={code_crop[1]}, right={code_crop[2]}, bottom={code_crop[3]}"
+        )
+        return code_crop
+
     # Use the widest detection of "anti-bot" as the anchor to reduce OCR noise.
     anchor_idx = max(target_indices, key=lambda i: ocr_data["width"][i])
 
@@ -396,8 +406,8 @@ def clamp_crop_box(box, img_size):
     return (left, top, right, bottom)
 
 
-def find_code_crop_after_anchor(ocr_data, img_size, anchor_idx):
-    """Searches for a 'Code:' label that appears after the anti-bot anchor and crops the code text."""
+def find_code_crop(ocr_data, img_size):
+    """Attempts to locate and crop only the captcha code following a detected 'Code:' label."""
     text_entries = ocr_data.get("text", [])
     if not text_entries:
         return None
@@ -405,24 +415,14 @@ def find_code_crop_after_anchor(ocr_data, img_size, anchor_idx):
     entry_count = len(text_entries)
     width, height = img_size
 
-    anchor_page = ocr_data.get("page_num", [None])[anchor_idx] if anchor_idx is not None else None
-    anchor_top = ocr_data.get("top", [None])[anchor_idx] if anchor_idx is not None else None
-
-    for idx in range(anchor_idx + 1 if anchor_idx is not None else 0, entry_count):
+    for idx in range(entry_count):
         raw_text = text_entries[idx]
         if not raw_text or not raw_text.strip():
             continue
 
         cleaned = raw_text.strip()
         lowered = cleaned.lower()
-        if not lowered.startswith("code:"):
-            continue
-
-        if anchor_page is not None and ocr_data.get("page_num", [None])[idx] != anchor_page:
-            continue
-
-        entry_top = ocr_data.get("top", [None])[idx]
-        if anchor_top is not None and entry_top is not None and entry_top < anchor_top:
+        if not lowered.startswith("code"):
             continue
 
         base_left = ocr_data["left"][idx]
@@ -431,6 +431,7 @@ def find_code_crop_after_anchor(ocr_data, img_size, anchor_idx):
         base_height = ocr_data["height"][idx]
         base_right = base_left + base_width
 
+        page_num = ocr_data.get("page_num", [None])[idx]
         block_num = ocr_data.get("block_num", [None])[idx]
         par_num = ocr_data.get("par_num", [None])[idx]
         line_num = ocr_data.get("line_num", [None])[idx]
@@ -444,18 +445,16 @@ def find_code_crop_after_anchor(ocr_data, img_size, anchor_idx):
             if not comparison_text or not comparison_text.strip():
                 continue
 
-            if anchor_page is not None and ocr_data.get("page_num", [None])[j] != anchor_page:
-                continue
-
             if (
-                ocr_data.get("block_num", [None])[j] != block_num
+                ocr_data.get("page_num", [None])[j] != page_num
+                or ocr_data.get("block_num", [None])[j] != block_num
                 or ocr_data.get("par_num", [None])[j] != par_num
                 or ocr_data.get("line_num", [None])[j] != line_num
             ):
                 continue
 
             comparison_left = ocr_data["left"][j]
-            if comparison_left < base_right - 3:
+            if comparison_left < base_right - 3:  # Must appear to the right of the label.
                 continue
 
             if not re.search(r"[A-Za-z0-9]", comparison_text):
