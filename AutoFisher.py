@@ -12,7 +12,7 @@ from twocaptcha import TwoCaptcha
 from twocaptcha import ApiException
 from src.CooldownGenerator.cooldown_humanizer import HumanCooldown
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 
 # =====================================================================
 # --- 1. CONFIGURATION ---
@@ -184,15 +184,7 @@ def update_base_cooldown(new_base):
         return False
 
     BASE_SLEEP = new_value
-
-    try:
-        humanizedCooldown.retune_base(new_value)
-    except AttributeError:
-        humanizedCooldown.base = new_value
-    except ValueError as exc:
-        print(f"Cooldown update error: {exc}")
-        return False
-
+    humanizedCooldown.base = new_value
     log_event("CONFIG", "update_base_cooldown", f"Base cooldown adjusted to {new_value:.2f}s.")
     return True
 
@@ -557,18 +549,10 @@ class BotControlGUI(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        # --- Window chrome / overlay behavior ---
-        self.overrideredirect(True)
-        self.wm_attributes("-topmost", True)
-        self.wm_attributes("-alpha", 0.92)
-        self.configure(bg="#111827")
-        self.geometry("420x260")
+        self.title("Discord Fishing Bot Control Panel")
+        self.geometry("460x280")
         self.resizable(False, False)
-
-        self.after(50, self.release_focus)
-
-        self._drag_offset = (0, 0)
-        self._scale_commit_job = None
+        self.configure(bg="#1f2933")
 
         style = ttk.Style(self)
         try:
@@ -576,241 +560,151 @@ class BotControlGUI(tk.Tk):
         except tk.TclError:
             pass
 
-        style.configure("TFrame", background="#111827")
-        style.configure("Overlay.TFrame", background="#1f2933")
-        style.configure("OverlayAccent.TFrame", background="#111827")
-        style.configure("Title.TLabel", background="#111827", foreground="#f5f7fa", font=("Segoe UI", 13, "bold"))
-        style.configure("Status.TLabel", background="#1f2933", foreground="#e4e8f0", font=("Segoe UI", 12, "bold"))
-        style.configure("Detail.TLabel", background="#1f2933", foreground="#cbd2d9", font=("Segoe UI", 10))
+        style.configure("TFrame", background="#1f2933")
+        style.configure("Card.TFrame", background="#27313d")
+        style.configure("Card.TLabelframe", background="#27313d", foreground="#f5f7fa")
+        style.configure("Card.TLabelframe.Label", background="#27313d", foreground="#f5f7fa", font=("Segoe UI", 11, "bold"))
+        style.configure("Title.TLabel", background="#1f2933", foreground="#f5f7fa", font=("Segoe UI", 16, "bold"))
+        style.configure("Subtitle.TLabel", background="#1f2933", foreground="#9aa5b1", font=("Segoe UI", 10))
+        style.configure("Status.TLabel", background="#27313d", foreground="#f5f7fa", font=("Segoe UI", 12, "bold"))
+        style.configure("Detail.TLabel", background="#27313d", foreground="#d9e2ec", font=("Segoe UI", 10))
         style.configure(
             "Control.TButton",
-            font=("Segoe UI", 10, "bold"),
-            padding=(10, 6),
+            font=("Segoe UI", 11, "bold"),
+            padding=(12, 6),
             background="#334155",
             foreground="#f5f7fa",
         )
-        style.map(
-            "Control.TButton",
-            background=[("active", "#3e4c59"), ("!active", "#334155")],
-            foreground=[("disabled", "#7b8794"), ("!disabled", "#f5f7fa")],
+        style.map("Control.TButton",
+                  background=[('active', '#3e4c59'), ('!active', '#334155')],
+                  foreground=[('disabled', '#7b8794'), ('!disabled', '#f5f7fa')])
+        style.configure("Accent.TButton", font=("Segoe UI", 11, "bold"), padding=(12, 6), background="#1d4ed8", foreground="#f5f7fa")
+        style.map("Accent.TButton",
+                  background=[('active', '#2563eb'), ('!active', '#1d4ed8')],
+                  foreground=[('disabled', '#9aa5b1'), ('!disabled', '#f5f7fa')])
+
+        main_frame = ttk.Frame(self, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Label(main_frame, text="Discord Fishing Bot", style="Title.TLabel")
+        header.pack(anchor=tk.W)
+
+        subtitle = ttk.Label(
+            main_frame,
+            text="Control the automation with intuitive buttons and live status updates.",
+            style="Subtitle.TLabel",
+            wraplength=400,
         )
-        style.configure(
-            "Accent.TButton",
-            font=("Segoe UI", 10, "bold"),
-            padding=(10, 6),
-            background="#2563eb",
-            foreground="#f5f7fa",
-        )
-        style.map(
-            "Accent.TButton",
-            background=[("active", "#1d4ed8"), ("!active", "#2563eb")],
-            foreground=[("disabled", "#9aa5b1"), ("!disabled", "#f5f7fa")],
-        )
+        subtitle.pack(anchor=tk.W, pady=(0, 15))
 
-        chrome = ttk.Frame(self, style="OverlayAccent.TFrame", padding=(12, 8))
-        chrome.pack(fill=tk.X)
-
-        title = ttk.Label(chrome, text="Fishing Bot Overlay", style="Title.TLabel")
-        title.pack(side=tk.LEFT)
-
-        close_btn = ttk.Button(
-            chrome,
-            text="✕",
-            width=3,
-            style="Control.TButton",
-            command=self.close_overlay,
-        )
-        close_btn.pack(side=tk.RIGHT)
-
-        chrome.bind("<ButtonPress-1>", self.start_move)
-        chrome.bind("<B1-Motion>", self.do_move)
-        chrome.bind("<ButtonRelease-1>", self.stop_move)
-        title.bind("<ButtonPress-1>", self.start_move)
-        title.bind("<B1-Motion>", self.do_move)
-        title.bind("<ButtonRelease-1>", self.stop_move)
-
-        body = ttk.Frame(self, style="Overlay.TFrame", padding=15)
-        body.pack(fill=tk.BOTH, expand=True)
-
-        status_frame = ttk.Frame(body, style="Overlay.TFrame", padding=10)
-        status_frame.pack(fill=tk.X)
+        status_frame = ttk.Frame(main_frame, style="Card.TFrame", padding=15)
+        status_frame.pack(fill=tk.X, pady=(0, 15))
 
         self.status_var = tk.StringVar(value="Status: Idle")
-        ttk.Label(status_frame, textvariable=self.status_var, style="Status.TLabel").pack(anchor=tk.W)
+        status_label = ttk.Label(status_frame, textvariable=self.status_var, style="Status.TLabel")
+        status_label.pack(anchor=tk.W)
 
         self.detail_var = tk.StringVar(value=f"Base cooldown: {BASE_SLEEP:.2f}s")
-        ttk.Label(status_frame, textvariable=self.detail_var, style="Detail.TLabel").pack(anchor=tk.W, pady=(4, 0))
+        detail_label = ttk.Label(status_frame, textvariable=self.detail_var, style="Detail.TLabel")
+        detail_label.pack(anchor=tk.W, pady=(5, 0))
 
-        self.feedback_var = tk.StringVar(value="")
-        self.feedback_label = ttk.Label(status_frame, textvariable=self.feedback_var, style="Detail.TLabel")
-        self.feedback_label.pack(anchor=tk.W, pady=(4, 0))
-
-        button_frame = ttk.Frame(body, style="Overlay.TFrame")
-        button_frame.pack(fill=tk.X, pady=(12, 4))
+        button_frame = ttk.Frame(main_frame, padding=(0, 5))
+        button_frame.pack(fill=tk.X)
 
         self.start_button = ttk.Button(
             button_frame,
             text="Start",
             style="Accent.TButton",
             command=self.handle_start,
+            width=12,
         )
-        self.start_button.grid(row=0, column=0, padx=4, pady=4, sticky="ew")
+        self.start_button.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
 
         self.pause_button = ttk.Button(
             button_frame,
             text="Pause",
             style="Control.TButton",
             command=self.toggle_pause,
+            width=12,
         )
-        self.pause_button.grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+        self.pause_button.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
         self.stop_button = ttk.Button(
             button_frame,
             text="Stop",
             style="Control.TButton",
             command=self.handle_stop,
+            width=12,
         )
-        self.stop_button.grid(row=0, column=2, padx=4, pady=4, sticky="ew")
+        self.stop_button.grid(row=0, column=2, padx=5, pady=5, sticky="ew")
 
         button_frame.columnconfigure((0, 1, 2), weight=1)
-
-        cooldown_frame = ttk.Frame(body, style="Overlay.TFrame", padding=(0, 8, 0, 0))
-        cooldown_frame.pack(fill=tk.X)
-
-        ttk.Label(cooldown_frame, text="Cooldown (seconds)", style="Detail.TLabel").grid(row=0, column=0, sticky="w")
-
-        self.cooldown_value = tk.DoubleVar(value=BASE_SLEEP)
-        self.cooldown_entry_var = tk.StringVar(value=f"{BASE_SLEEP:.2f}")
-
-        self.cooldown_entry = ttk.Entry(cooldown_frame, textvariable=self.cooldown_entry_var, font=("Segoe UI", 10))
-        self.cooldown_entry.grid(row=0, column=1, padx=(8, 4), sticky="ew")
-        self.cooldown_entry.bind("<Return>", self.apply_cooldown)
-        self.cooldown_entry.bind("<FocusOut>", self.apply_cooldown)
-
-        self.cooldown_apply = ttk.Button(
-            cooldown_frame,
-            text="Set",
-            style="Control.TButton",
-            command=self.apply_cooldown,
-        )
-        self.cooldown_apply.grid(row=0, column=2, padx=(4, 0))
-
-        self.cooldown_scale = ttk.Scale(
-            cooldown_frame,
-            variable=self.cooldown_value,
-            from_=0.2,
-            to=30.0,
-            orient=tk.HORIZONTAL,
-            command=self.on_cooldown_scale,
-        )
-        self.cooldown_scale.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-
-        cooldown_frame.columnconfigure(1, weight=1)
 
         self.start_button.state(["!disabled"])
         self.pause_button.state(["disabled"])
         self.stop_button.state(["disabled"])
 
+        cooldown_frame = ttk.LabelFrame(main_frame, text="Cooldown Settings", style="Card.TLabelframe", padding=15)
+        cooldown_frame.pack(fill=tk.X, pady=(15, 0))
+
+        cooldown_label = ttk.Label(
+            cooldown_frame,
+            text="Base cooldown (seconds):",
+            style="Detail.TLabel",
+        )
+        cooldown_label.grid(row=0, column=0, sticky="w")
+
+        self.cooldown_var = tk.StringVar(value=f"{BASE_SLEEP:.2f}")
+        self.cooldown_entry = ttk.Entry(cooldown_frame, textvariable=self.cooldown_var, font=("Segoe UI", 11))
+        self.cooldown_entry.grid(row=0, column=1, padx=10, sticky="ew")
+
+        self.cooldown_apply = ttk.Button(
+            cooldown_frame,
+            text="Apply",
+            style="Control.TButton",
+            command=self.apply_cooldown,
+            width=10,
+        )
+        self.cooldown_apply.grid(row=0, column=2, padx=5)
+
+        cooldown_frame.columnconfigure(1, weight=1)
+
         self.after(250, self.poll_state)
 
     def handle_start(self):
         if solver is None:
-            self.show_feedback("2Captcha solver not initialized.")
+            messagebox.showerror("Solver not initialized", "2Captcha solver is not initialized. Check your API key.")
             return
 
         start_script()
-        self.show_feedback("Bot started.")
-        self.release_focus()
         self.poll_state(force=True)
 
     def handle_stop(self):
         if running:
-            stop_script("Script stopped via overlay.")
-            self.show_feedback("Bot stopped.")
+            stop_script("Script stopped via GUI.")
         else:
-            self.show_feedback("Bot already stopped.")
-        self.release_focus()
+            print("Script is already stopped.")
         self.poll_state(force=True)
 
     def toggle_pause(self):
         if not running:
-            self.show_feedback("Start the bot before pausing.")
+            messagebox.showinfo("Not running", "Start the bot before attempting to pause it.")
             return
 
         if paused.is_set():
             resume_script()
-            self.show_feedback("Resumed.")
         else:
             pause_script()
-            self.show_feedback("Paused.")
-        self.release_focus()
         self.poll_state(force=True)
 
-    def apply_cooldown(self, event=None):
-        value = self.cooldown_entry_var.get()
+    def apply_cooldown(self):
+        value = self.cooldown_var.get()
         if update_base_cooldown(value):
-            self.cooldown_entry_var.set(f"{BASE_SLEEP:.2f}")
-            self.cooldown_value.set(BASE_SLEEP)
+            messagebox.showinfo("Cooldown Updated", f"Base cooldown set to {BASE_SLEEP:.2f} seconds.")
             self.detail_var.set(f"Base cooldown: {BASE_SLEEP:.2f}s")
-            self.show_feedback(f"Cooldown set to {BASE_SLEEP:.2f}s")
         else:
-            self.cooldown_entry_var.set(f"{BASE_SLEEP:.2f}")
-            self.show_feedback("Enter a positive number.")
-
-        if event is None or getattr(event, "keysym", "") == "Return":
-            self.release_focus()
-
-        if event is not None and getattr(event, "keysym", "") == "Return":
-            return "break"
-
-    def on_cooldown_scale(self, value):
-        try:
-            numeric_value = float(value)
-        except (TypeError, ValueError):
-            return
-
-        self.cooldown_entry_var.set(f"{numeric_value:.2f}")
-
-        if self._scale_commit_job:
-            self.after_cancel(self._scale_commit_job)
-        self._scale_commit_job = self.after(150, self.commit_scale_value)
-
-    def commit_scale_value(self):
-        self._scale_commit_job = None
-        value = self.cooldown_value.get()
-        if update_base_cooldown(value):
-            self.cooldown_entry_var.set(f"{BASE_SLEEP:.2f}")
-            self.detail_var.set(f"Base cooldown: {BASE_SLEEP:.2f}s")
-            self.show_feedback(f"Cooldown set to {BASE_SLEEP:.2f}s")
-            self.release_focus()
-
-    def show_feedback(self, message, duration=2500):
-        self.feedback_var.set(message)
-        if hasattr(self, "_feedback_job") and self._feedback_job is not None:
-            self.after_cancel(self._feedback_job)
-        self._feedback_job = self.after(duration, self.clear_feedback)
-
-    def clear_feedback(self):
-        self.feedback_var.set("")
-        self._feedback_job = None
-
-    def start_move(self, event):
-        self._drag_offset = (event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty())
-
-    def stop_move(self, _event):
-        self._drag_offset = (0, 0)
-
-    def do_move(self, event):
-        if self._drag_offset == (0, 0):
-            return
-        x = event.x_root - self._drag_offset[0]
-        y = event.y_root - self._drag_offset[1]
-        self.geometry(f"+{x}+{y}")
-
-    def close_overlay(self):
-        if running:
-            stop_script("Overlay closed by user.")
-        self.destroy()
+            messagebox.showerror("Invalid Value", "Please enter a numeric value greater than zero.")
+            self.cooldown_var.set(f"{BASE_SLEEP:.2f}")
 
     def poll_state(self, force=False):
         state_text = "Idle"
@@ -818,9 +712,8 @@ class BotControlGUI(tk.Tk):
             state_text = "Paused" if paused.is_set() else "Running"
         self.status_var.set(f"Status: {state_text}")
 
-        if self.cooldown_entry.focus_get() is not self.cooldown_entry or force:
-            self.cooldown_entry_var.set(f"{BASE_SLEEP:.2f}")
-            self.cooldown_value.set(BASE_SLEEP)
+        if not self.cooldown_entry.focus_get() == self.cooldown_entry or force:
+            self.cooldown_var.set(f"{BASE_SLEEP:.2f}")
 
         self.detail_var.set(f"Base cooldown: {BASE_SLEEP:.2f}s")
 
@@ -836,20 +729,6 @@ class BotControlGUI(tk.Tk):
             self.pause_button.configure(text="Pause")
 
         self.after(250, self.poll_state)
-
-    def release_focus(self):
-        if not self.winfo_exists():
-            return
-
-        def _drop_focus():
-            if not self.winfo_exists():
-                return
-            try:
-                self.tk.call("focus", "none")
-            except tk.TclError:
-                pass
-
-        self.after(60, _drop_focus)
 
 if __name__ == "__main__":
     # Initialize the unique log file name on script start
