@@ -9,7 +9,6 @@ from datetime import datetime
 import threading
 import sys
 import os
-import numpy as np
 from twocaptcha import TwoCaptcha
 from twocaptcha import ApiException
 from src.CooldownGenerator.cooldown_humanizer import HumanCooldown
@@ -44,6 +43,12 @@ CAPTCHA_CROP_BOX = (
     480,  # Right pixel inside the captured area
     610   # Bottom pixel inside the captured area
 )
+
+# CAPTCHA ANCHOR OFFSETS (relative to the detected 'anti-bot' text)
+CAPTCHA_ANCHOR_VERTICAL_OFFSET = 60   # Pixels below the bottom of the anchor to begin the crop
+CAPTCHA_ANCHOR_HORIZONTAL_ADJUST = 0  # Horizontal adjustment from the anchor center
+CAPTCHA_ANCHOR_CROP_WIDTH = 320       # Width of the captcha crop
+CAPTCHA_ANCHOR_CROP_HEIGHT = 120      # Height of the captcha crop
 
 # CAPTCHA IMAGE STORAGE (for manual inspection and API submission)
 CAPTCHA_STORAGE_DIR = os.path.join("captchas", "full")
@@ -279,9 +284,7 @@ def save_last_captcha_image(filename="api_captcha_current.png"):
 
 
 def detect_captcha_region(img):
-    """Attempts to locate the captcha image relative to the 'anti-bot' text."""
-    width, height = img.size
-
+    """Locates the captcha image by anchoring off the detected 'anti-bot' text."""
     try:
         ocr_data = pytesseract.image_to_data(img, output_type=Output.DICT)
     except Exception as e:
@@ -302,56 +305,47 @@ def detect_captcha_region(img):
     if not target_indices:
         return None
 
-    # Use the widest detection of "anti-bot" as the anchor.
+    # Use the widest detection of "anti-bot" as the anchor to reduce OCR noise.
     anchor_idx = max(target_indices, key=lambda i: ocr_data["width"][i])
     anchor_left = ocr_data["left"][anchor_idx]
     anchor_top = ocr_data["top"][anchor_idx]
     anchor_width = ocr_data["width"][anchor_idx]
     anchor_height = ocr_data["height"][anchor_idx]
 
-    # Define a search window beneath the anchor text.
-    horizontal_padding = int(anchor_width * 2.5)
-    vertical_padding = int(anchor_height * 0.6)
-    search_height = int(anchor_height * 6)
+    anchor_bottom = anchor_top + anchor_height
+    anchor_center_x = anchor_left + anchor_width / 2
 
-    search_left = max(0, anchor_left - horizontal_padding // 2)
-    search_right = min(width, anchor_left + anchor_width + horizontal_padding)
-    search_top = max(0, anchor_top + anchor_height + vertical_padding)
-    search_bottom = min(height, search_top + search_height)
+    crop_top = anchor_bottom + CAPTCHA_ANCHOR_VERTICAL_OFFSET
+    crop_left = anchor_center_x - (CAPTCHA_ANCHOR_CROP_WIDTH / 2) + CAPTCHA_ANCHOR_HORIZONTAL_ADJUST
+    crop_right = crop_left + CAPTCHA_ANCHOR_CROP_WIDTH
+    crop_bottom = crop_top + CAPTCHA_ANCHOR_CROP_HEIGHT
 
-    if search_bottom <= search_top or search_right <= search_left:
+    unclamped_box = (crop_left, crop_top, crop_right, crop_bottom)
+    crop_box = clamp_crop_box(unclamped_box, img.size)
+
+    if crop_box is None:
+        log_event(
+            "WARNING",
+            "detect_captcha_region",
+            "Calculated crop box is outside image bounds.",
+            ocr_text=(
+                f"Anchor: left={anchor_left}, top={anchor_top}, width={anchor_width}, height={anchor_height}\n"
+                f"Unclamped crop: {unclamped_box}"
+            )
+        )
         return None
 
-    search_region = img.crop((search_left, search_top, search_right, search_bottom)).convert("L")
-    search_array = np.array(search_region)
+    log_event(
+        "INFO",
+        "detect_captcha_region",
+        "Derived captcha crop from 'anti-bot' anchor.",
+        ocr_text=(
+            f"Anchor: left={anchor_left}, top={anchor_top}, width={anchor_width}, height={anchor_height}\n"
+            f"Crop start: left={crop_box[0]}, top={crop_box[1]}"
+        )
+    )
 
-    # Identify pixels that are not close to white (likely part of the captcha image/text).
-    mask = search_array < 245
-
-    if not mask.any():
-        return None
-
-    rows = np.where(mask.any(axis=1))[0]
-    cols = np.where(mask.any(axis=0))[0]
-
-    region_top = int(rows[0])
-    region_bottom = int(rows[-1]) + 1
-    region_left = int(cols[0])
-    region_right = int(cols[-1]) + 1
-
-    # Expand slightly to include padding around captcha borders.
-    padding_y = int(anchor_height * 0.4)
-    padding_x = int(anchor_width * 0.3)
-
-    cropped_left = max(search_left, search_left + region_left - padding_x)
-    cropped_top = max(0, search_top + region_top - padding_y)
-    cropped_right = min(width, search_left + region_right + padding_x)
-    cropped_bottom = min(height, search_top + region_bottom + padding_y)
-
-    if cropped_bottom <= cropped_top or cropped_right <= cropped_left:
-        return None
-
-    return (cropped_left, cropped_top, cropped_right, cropped_bottom)
+    return crop_box
 
 
 def clamp_crop_box(box, img_size):
