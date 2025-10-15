@@ -9,11 +9,10 @@ from datetime import datetime
 import threading
 import sys
 import os
-from twocaptcha import TwoCaptcha
-from twocaptcha import ApiException
 from src.CooldownGenerator.cooldown_humanizer import HumanCooldown
 import tkinter as tk
 from tkinter import ttk, messagebox
+from anticaptchaofficial.imagecaptcha import *
 
 # =====================================================================
 # --- 1. CONFIGURATION ---
@@ -23,10 +22,6 @@ from tkinter import ttk, messagebox
 BASE_SLEEP = 3.0
 humanizedCooldown = HumanCooldown(base=BASE_SLEEP)
 LOG_FILE = None  # Defined in __main__
-
-# API CONFIG
-# **IMPORTANT**: Replace with your 2Captcha API key. Uses environment variable as fallback.
-API_KEY = os.getenv('APIKEY_2CAPTCHA', '6840474409ea1ab7504ed66ea906ba7d')
 
 # SCREEN CAPTURE AREA (Must be defined to capture the chat window containing the CAPTCHA)
 CAPTURE_AREA = {
@@ -38,17 +33,17 @@ CAPTURE_AREA = {
 
 # CAPTCHA IMAGE CROPPING (adjust if your Discord layout differs)
 CAPTCHA_CROP_BOX = (
-    120,  # Left pixel inside the captured area
+    320,  # Left pixel inside the captured area
     420,  # Top pixel inside the captured area
     480,  # Right pixel inside the captured area
     610   # Bottom pixel inside the captured area
 )
 
 # CAPTCHA ANCHOR OFFSETS (relative to the detected 'anti-bot' text)
-CAPTCHA_ANCHOR_VERTICAL_OFFSET = 60   # Pixels below the bottom of the anchor to begin the crop
-CAPTCHA_ANCHOR_HORIZONTAL_ADJUST = 0  # Horizontal adjustment from the anchor center
-CAPTCHA_ANCHOR_CROP_WIDTH = 320       # Width of the captcha crop
-CAPTCHA_ANCHOR_CROP_HEIGHT = 120      # Height of the captcha crop
+CAPTCHA_ANCHOR_VERTICAL_OFFSET = 117   # Pixels below the bottom of the anchor to begin the crop
+CAPTCHA_ANCHOR_HORIZONTAL_ADJUST = 42  # Horizontal adjustment from the anchor center
+CAPTCHA_ANCHOR_CROP_WIDTH = 150       # Width of the captcha crop
+CAPTCHA_ANCHOR_CROP_HEIGHT = 32      # Height of the captcha crop
 
 # CAPTCHA IMAGE STORAGE (for manual inspection and API submission)
 CAPTCHA_STORAGE_DIR = os.path.join("captchas", "full")
@@ -227,7 +222,7 @@ def save_screenshot(filename):
 
 def save_last_captcha_image(filename="api_captcha_current.png"):
     """
-    Saves the latest screenshot for the 2Captcha API.
+    Saves the latest screenshot for the Anti-Captcha API.
     Stores both the original capture and a cropped captcha image for review.
     Returns the file path used for API submission (cropped image).
     """
@@ -437,31 +432,23 @@ def clear_input_line():
 # =====================================================================
 
 def api_solve_captcha(img_path):
-    """Sends the CAPTCHA image path to the 2Captcha service for solving."""
+    """Sends the CAPTCHA image path to the Anti-Captcha service for solving."""
     if solver is None:
         log_event("ERROR", "api_solve_captcha", "Solver not initialized. Cannot use API.")
         return None
 
-    try:
-        log_event("API_CALL", "api_solve_captcha", f"Sending image path {img_path} to 2Captcha service...")
+    log_event("API_CALL", "api_solve_captcha", f"Sending image path {img_path} to Anti-Captcha   service...")
 
-        result = solver.normal(
-            file=img_path,
-            caseSensitive=1,
-            minLen=4,
-            maxLen=8
-        )
+    result = solver.solve_and_return_solution(img_path)
+    captcha_text = result
 
-        captcha_text = result['code']
+    if captcha_text != 0:
         log_event("API_CALL", "api_solve_captcha", f"Received solution: **{captcha_text}**")
-        return captcha_text
+    else:
+        log_event("ERROR", "api_solve_captcha", "TASK FINISHED WITRH ERROR")
+        return None
 
-    except ApiException as e:
-        log_event("API_FAIL", "api_solve_captcha", f"2Captcha API failed: {e}")
-        return None
-    except Exception as e:
-        log_event("ERROR", "api_solve_captcha", f"An unexpected API error occurred: {e}")
-        return None
+    return captcha_text
 
 
 def verify_api_response_timing(code):
@@ -626,46 +613,6 @@ def check_loop():
 
     log_event("INFO", "check_loop", "Thread stopped.")
 
-# =====================================================================
-# --- 7. DEBUGGING AND LISTENER SETUP ---
-# =====================================================================
-
-def test_scan_for_captcha():
-    """F10: Captures screen, performs OCR, and tests API functionality."""
-    global solver
-    print("\n*** F10 Pressed! Starting CAPTCHA Test Scan... ***")
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    screenshot_filename = f"test_screenshot_{timestamp}.png"
-
-    img = save_screenshot(screenshot_filename)
-    if img is None:
-        return
-
-    raw_text = ocr_screenshot(img)
-    log_event("TEST", "test_scan_for_captcha", "F10 Test Scan performed.", raw_text)
-
-    print("\n--- OCR Raw Result ---")
-    print(raw_text)
-    print("----------------------")
-
-    if "anti-bot" in raw_text.lower():
-        print("Detected 'Anti-bot' string during test scan. Script will use 2Captcha for resolution.")
-
-    if solver is None:
-        print("ERROR: 2Captcha solver is not initialized. Cannot test API.")
-        return
-
-    print("Solving captcha with 2Captcha API...")
-    try:
-        result = solver.normal(file=screenshot_filename, caseSensitive=1)
-        print("\n--- 2CAPTCHA API Result ---")
-        print(f"Solved Code: **{result['code']}**")
-        print("---------------------------")
-    except Exception as e:
-        print(f"ERROR: Could not solve captcha: {e}")
-
-
 def start_script():
     """Initializes and starts both fish and check threads on F8."""
     global running
@@ -706,8 +653,6 @@ def on_press(key):
             start_script()
         elif key == keyboard.Key.f9:
             stop_script("Script stopped manually by F9 key.")
-        elif key == keyboard.Key.f10:
-            test_scan_for_captcha()
     except AttributeError:
         pass
 
@@ -859,7 +804,7 @@ class BotControlGUI(tk.Tk):
 
     def handle_start(self):
         if solver is None:
-            messagebox.showerror("Solver not initialized", "2Captcha solver is not initialized. Check your API key.")
+            messagebox.showerror("Solver not initialized", "Anti Captcha solver is not initialized. Check your API key.")
             return
 
         start_script()
@@ -925,12 +870,17 @@ if __name__ == "__main__":
         i += 1
     LOG_FILE = f"{current_date}_bot_log_{i}.txt"
 
-    # Initialize the 2Captcha solver once on startup
     try:
-        solver = TwoCaptcha(API_KEY)
-        print("2Captcha Solver initialized.")
+        solver = imagecaptcha()
+        solver.set_verbose(1)
+        solver.set_key("ccbfc9559c1b6f36675f0bf5247299ab")
+        solver.set_case(1)
+        solver.set_minLength(4)
+        solver.set_maxLength(8)
+        solver.set_comment("[Case Sensitive] image captcha or the code following after Code: )")
+        print("Captcha Solver initialized.")
     except Exception as e:
-        print(f"!!! CRITICAL: Failed to initialize 2Captcha solver: {e} !!!")
+        print(f"!!! CRITICAL: Failed to initialize captcha solver: {e} !!!")
         solver = None
 
     gui = BotControlGUI()
