@@ -59,3 +59,35 @@ To merge this refactor into an older checkout:
 4. Re-run `python -m compileall AutoFisher.py` (or your preferred tests) to confirm syntax correctness.
 
 These steps ensure the bot immediately relies on Anti-Captcha when the `Anti-bot` message appears and honors the new cooldown safeguards.
+
+## Human cooldown tuning
+
+The `HumanCooldown` generator now keeps wall-clock session stats so fatigue-aware breaks can accumulate naturally across long runs. When you instantiate `HumanCooldown`, you can pass:
+
+- `circadian_break_windows`: a mapping such as
+  ```python
+  {
+      "medium": {
+          "window": (10, 15),        # local hours that favour lunch-length pauses
+          "median": 420.0,           # target median seconds when inside the window
+          "off_median": 270.0,       # fallback median outside the window
+          "floor": 150.0,
+          "off_floor": 90.0,
+          "boost": 1.3,              # hazard multiplier inside the window
+          "off_boost": 0.9,
+      },
+      "overnight": {
+          "window": (22, 6),
+          "median": 7200.0,
+          "off_median": 5400.0,
+          "floor": 2400.0,
+          "off_floor": 1500.0,
+          "boost": 2.0,
+          "off_boost": 0.7,
+      },
+  }
+  ```
+  Each entry controls both the sampled downtime distribution and how strongly that profile is favoured at different hours of the day. Values you omit fall back to the defaults above.
+- Fatigue controls: `fatigue_soft_seconds`, `fatigue_hard_seconds`, `fatigue_reset_seconds`, and `fatigue_hazard_strength` tune how quickly extended activity ramps longer breaks and how much real rest is required before the fatigue counter unwinds.
+
+Two new break profiles (`"medium"` and `"overnight"`) complement the existing short and long pauses so the generated schedule now includes multi-minute to multi-hour downtime spikes. The debug helper at `src/Debug/heuristics_generator.py` plots an additional session-level downtime histogram to validate that your chosen parameters produce the desired mix of irregular long pauses.
