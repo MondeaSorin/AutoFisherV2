@@ -16,10 +16,10 @@ except ImportError:
 
 # ----- Pathing: allow importing from ../CooldownGenerator -----
 THIS_DIR = os.path.abspath(os.path.dirname(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
-GEN_DIR = os.path.join(PROJECT_ROOT, "CooldownGenerator")
-LOG_DIR = os.path.join(PROJECT_ROOT, "Logs")
-os.makedirs(LOG_DIR, exist_ok=True)
+
+from src.Utils.paths import LOG_DIR, PROJECT_ROOT, log_path  # noqa: E402
+
+GEN_DIR = os.path.join(PROJECT_ROOT, "src", "CooldownGenerator")
 
 if GEN_DIR not in sys.path:
     sys.path.append(GEN_DIR)
@@ -31,9 +31,8 @@ NUM_ENTRIES = 10_000
 HISTOGRAM_BINS = 100
 ROUTINE_MAX_CLIP = 6.0
 
-# Log file: Logs/heuristics_generator-logs-<DDMMYYYYHHMMSS>.txt
-TIMESTAMP = datetime.now().strftime("%d%m%Y%H%M%S")
-LOG_FILENAME = os.path.join(LOG_DIR, f"heuristics_generator-logs-{TIMESTAMP}.txt")
+# Log file: Logs/heuristics_generator-logs-<timestamp>.txt
+LOG_FILENAME = log_path("heuristics_generator")
 
 # Create a stateful generator instance (aligned with your HumanCooldown)
 human_cooldown = HumanCooldown()
