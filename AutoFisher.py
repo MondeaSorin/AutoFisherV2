@@ -37,6 +37,11 @@ CAPTCHA_ANCHOR_HORIZONTAL_ADJUST = 42  # Horizontal adjustment from the anchor c
 CAPTCHA_ANCHOR_CROP_WIDTH = 150       # Width of the captcha crop
 CAPTCHA_ANCHOR_CROP_HEIGHT = 32      # Height of the captcha crop
 
+CAPTCHA_ANCHOR_CODE_VERTICAL_OFFSET = 30   # Pixels below the bottom of the anchor to begin the crop
+CAPTCHA_ANCHOR_CODE_HORIZONTAL_ADJUST = 38  # Horizontal adjustment from the anchor center
+CAPTCHA_ANCHOR_CODE_CROP_WIDTH = 59       # Width of the captcha crop
+CAPTCHA_ANCHOR_CODE_CROP_HEIGHT = 32      # Height of the captcha crop
+
 # CAPTCHA IMAGE STORAGE (for manual inspection and API submission)
 CAPTCHA_STORAGE_DIR = os.path.join("captchas", "full")
 CAPTCHA_CROPPED_DIR = os.path.join("captchas", "cropped")
@@ -63,6 +68,7 @@ TERMINATION_REASON = "Script manually started/stopped."
 LAST_SOLVED_CODE = None
 ANTI_BOT_DISABLED_UNTIL = 0.0
 LAST_SUPPRESSION_LOG = 0.0
+is_code = False
 
 # =====================================================================
 # --- 3. LOGGING AND CONTROL FUNCTIONS ---
@@ -302,6 +308,8 @@ def solve_full_screenshot():
 
 def detect_captcha_region(img):
     """Locates the captcha image by anchoring off the detected 'anti-bot' text."""
+    global is_code
+
     try:
         ocr_data = pytesseract.image_to_data(img, output_type=Output.DICT)
     except Exception as e:
@@ -332,10 +340,18 @@ def detect_captcha_region(img):
     anchor_bottom = anchor_top + anchor_height
     anchor_center_x = anchor_left + anchor_width / 2
 
-    crop_top = anchor_bottom + CAPTCHA_ANCHOR_VERTICAL_OFFSET
-    crop_left = anchor_center_x - (CAPTCHA_ANCHOR_CROP_WIDTH / 2) + CAPTCHA_ANCHOR_HORIZONTAL_ADJUST
-    crop_right = crop_left + CAPTCHA_ANCHOR_CROP_WIDTH
-    crop_bottom = crop_top + CAPTCHA_ANCHOR_CROP_HEIGHT
+    if is_code:
+        crop_top = anchor_bottom + CAPTCHA_ANCHOR_CODE_VERTICAL_OFFSET
+        crop_left = anchor_center_x - (CAPTCHA_ANCHOR_CODE_CROP_WIDTH / 2) + CAPTCHA_ANCHOR_CODE_HORIZONTAL_ADJUST
+        crop_right = crop_left + CAPTCHA_ANCHOR_CODE_CROP_WIDTH
+        crop_bottom = crop_top + CAPTCHA_ANCHOR_CODE_CROP_HEIGHT
+
+        is_code = False
+    else:
+        crop_top = anchor_bottom + CAPTCHA_ANCHOR_VERTICAL_OFFSET
+        crop_left = anchor_center_x - (CAPTCHA_ANCHOR_CROP_WIDTH / 2) + CAPTCHA_ANCHOR_HORIZONTAL_ADJUST
+        crop_right = crop_left + CAPTCHA_ANCHOR_CROP_WIDTH
+        crop_bottom = crop_top + CAPTCHA_ANCHOR_CROP_HEIGHT
 
     unclamped_box = (crop_left, crop_top, crop_right, crop_bottom)
     crop_box = clamp_crop_box(unclamped_box, img.size)
@@ -542,6 +558,7 @@ def fish_loop():
 def check_loop():
     """Second loop: continuously checks the screen for captcha or stop warnings."""
     global running
+    global is_code
     global LAST_SOLVED_CODE
     global ANTI_BOT_DISABLED_UNTIL
     global LAST_SUPPRESSION_LOG
@@ -565,6 +582,8 @@ def check_loop():
         # --- CAPTCHA DETECTION FLOW ---
 
         if "anti-bot" in raw_text_lower:
+            if "code:" in raw_text_lower:
+                is_code = True
             current_time = time.time()
 
             if current_time < ANTI_BOT_DISABLED_UNTIL:
