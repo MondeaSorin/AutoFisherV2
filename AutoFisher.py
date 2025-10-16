@@ -10,6 +10,7 @@ import threading
 import sys
 import os
 from src.CooldownGenerator.cooldown_humanizer import HumanCooldown
+from src.Utils.paths import log_path, screenshot_path
 import tkinter as tk
 from tkinter import ttk, messagebox
 from anticaptchaofficial.imagecaptcha import imagecaptcha
@@ -207,11 +208,19 @@ def update_base_cooldown(new_base):
 
 def save_screenshot(filename):
     """Captures and saves a screenshot of the CAPTURE_AREA to the specified filename."""
+    output_path = filename
+
+    if not os.path.isabs(output_path) and not os.path.dirname(output_path):
+        output_path = screenshot_path(output_path)
+
+    directory = os.path.dirname(output_path) or "."
+    os.makedirs(directory, exist_ok=True)
+
     try:
         with mss.mss() as sct:
             sct_img = sct.grab(CAPTURE_AREA)
             img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-            img.save(filename)
+            img.save(output_path)
             return img
     except Exception as e:
         log_event("ERROR", "save_screenshot", f"Could not capture screen: {e}")
@@ -913,13 +922,8 @@ class BotControlGUI(tk.Tk):
         self.after(250, self.poll_state)
 
 if __name__ == "__main__":
-    # Initialize the unique log file name on script start
-    current_date = datetime.now().strftime('%Y%m%d')
-    i = 0
-    # Ensure the log file is unique for today's run
-    while os.path.exists(f"{current_date}_bot_log_{i}.txt"):
-        i += 1
-    LOG_FILE = f"{current_date}_bot_log_{i}.txt"
+    # Initialize the log file inside Logs/
+    LOG_FILE = log_path("autofisher")
 
     try:
         solver = imagecaptcha()

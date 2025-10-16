@@ -2,8 +2,10 @@ import tkinter as tk
 from datetime import datetime
 import os
 
+from src.Utils.paths import LOG_DIR
+
 # --- Configuration ---
-LOG_FILENAME = "click_timestamps.txt"
+LOG_FILENAME = os.path.join(LOG_DIR, "click_timestamps.txt")
 SOUND_INTERVAL_MS = 3000  # 3000 milliseconds = 3 seconds
 BUTTON_COLOR_NORMAL = "#4CAF50"  # Green
 BUTTON_COLOR_ALERT = "#FF5733"  # Red-Orange for the 'sound' alert
