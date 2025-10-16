@@ -67,6 +67,10 @@ class HumanCooldown:
         p_slip: float = 0.015,
         slip_mu_ln: float = -1.0,            # lognormal median ~ exp(mu)
         slip_sigma_ln: float = 0.6,
+        # Fast routine slips (rare sub-min samples)
+        fast_slip_chance: float = 0.02,
+        fast_slip_decay: float = 0.32,
+        fast_slip_max_deviation: float = 1.1,
         # Real breaks (short & long)
         p_break: float = 0.004,
         short_break_s: tuple[float, float] = (7.0, 25.0),
@@ -109,6 +113,9 @@ class HumanCooldown:
         self.p_slip = p_slip
         self.slip_mu_ln = slip_mu_ln
         self.slip_sigma_ln = slip_sigma_ln
+        self.fast_slip_chance = max(0.0, fast_slip_chance)
+        self.fast_slip_decay = max(1e-3, fast_slip_decay)
+        self.fast_slip_max_deviation = max(0.0, fast_slip_max_deviation)
         self.p_break = p_break
         self.short_break_s = self._sanitise_bounds(short_break_s)
         self.p_long_break = p_long_break
@@ -183,6 +190,7 @@ class HumanCooldown:
         self._ou = 0.0
         self._warmup_left = 0
         self._warmup_span = max(1, warmup_clicks)
+        self.absolute_min_cooldown = max(0.1, min_clip * 0.25, 0.8)
 
         # Baseline ratios so we can retune the generator around a new base at runtime
         self._design_base = base if base > 0 else 1.0
@@ -198,6 +206,17 @@ class HumanCooldown:
         )
         self._design_warmup_bias_factor = warmup_bias / self._design_base
         self._design_slip_mu_ln = slip_mu_ln
+        self._design_fast_slip_decay_factor = fast_slip_decay / self._design_base
+        self._design_fast_slip_span_factor = (
+            fast_slip_max_deviation / self._design_base
+            if self._design_base > 0
+            else fast_slip_max_deviation
+        )
+        self._design_absolute_min_factor = (
+            self.absolute_min_cooldown / self._design_base
+            if self._design_base > 0
+            else None
+        )
         self._design_short_break_floor_factor = (
             self.short_break_floor / self._design_base
         )
@@ -348,15 +367,27 @@ class HumanCooldown:
         #    Re-sample jitter until routine is within [min_clip, max_clip]
         #    to avoid boundary pile-ups in the histogram.
         attempts = 0
+        lower_guard = max(
+            self.absolute_min_cooldown, self.min_clip - self.fast_slip_max_deviation
+        )
         while True:
             jitter = self._rng.gauss(0.0, sigma)
             routine = self.base + drift + jitter + warm_bias
             if self.min_clip <= routine <= self.max_clip:
                 break
+            deficit = self.min_clip - routine
+            if deficit > 0:
+                fast_prob = self.fast_slip_chance * exp(
+                    -deficit / max(1e-6, self.fast_slip_decay)
+                )
+                fast_prob = max(0.0, min(0.45, fast_prob))
+                if self._rng.random() < fast_prob:
+                    routine = max(lower_guard, routine)
+                    break
             attempts += 1
             if attempts >= self.max_truncation_resamples:
                 # safety fallback: clamp if rejection failed too many times
-                routine = max(self.min_clip, min(self.max_clip, routine))
+                routine = max(lower_guard, min(self.max_clip, routine))
                 break
 
         # 5) Micro pause (small hiccup)
@@ -373,7 +404,7 @@ class HumanCooldown:
         total = routine + micro + slip
 
         # 8) Guard & bookkeeping
-        result = max(0.8, total)
+        result = max(self.absolute_min_cooldown, total)
         self._seconds_since_break += result
         return result
 
@@ -392,6 +423,12 @@ class HumanCooldown:
         self.max_clip = max(self.min_clip + 0.1, base * self._design_max_clip_factor)
         self.micro_min = max(0.01, base * self._design_micro_min_factor)
         self.micro_max = max(self.micro_min + 0.01, base * self._design_micro_max_factor)
+        self.fast_slip_decay = max(
+            1e-3, base * self._design_fast_slip_decay_factor
+        )
+        self.fast_slip_max_deviation = max(
+            0.0, base * self._design_fast_slip_span_factor
+        )
         short_scaled = tuple(
             max(1.0, base * f) for f in self._design_short_break_factor
         )
@@ -433,6 +470,15 @@ class HumanCooldown:
 
         if scale > 0:
             self.slip_mu_ln = self._design_slip_mu_ln + log(scale)
+
+        if self._design_absolute_min_factor is not None:
+            self.absolute_min_cooldown = max(
+                0.1, base * self._design_absolute_min_factor
+            )
+        else:
+            self.absolute_min_cooldown = max(
+                0.1, self.min_clip * 0.25, self.absolute_min_cooldown
+            )
 
         self._refresh_break_profiles()
         self._warmup_span = max(1, self.warmup_clicks)
