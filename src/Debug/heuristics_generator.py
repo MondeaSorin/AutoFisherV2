@@ -30,6 +30,7 @@ from src.CooldownGenerator.cooldown_humanizer import HumanCooldown  # noqa: E402
 NUM_ENTRIES = 10_000
 HISTOGRAM_BINS = 100
 ROUTINE_MAX_CLIP = 6.0
+DOWNTIME_HISTOGRAM_BINS = 30
 
 # Log file: Logs/heuristics_generator-logs-<timestamp>.txt
 LOG_FILENAME = log_path("heuristics_generator")
@@ -52,11 +53,16 @@ def generate_and_analyze_cooldowns():
     print(f"Generating {NUM_ENTRIES} human-like cooldown intervals...")
 
     cooldown_times: list[float] = []
+    downtime_events: list[float] = []
+    downtime_threshold = getattr(human_cooldown, "short_break_floor", 30.0)
 
     # 1) Generate the cooldown times
     t0 = time.perf_counter()
     for _ in range(NUM_ENTRIES):
-        cooldown_times.append(human_cooldown.next())
+        value = human_cooldown.next()
+        cooldown_times.append(value)
+        if value >= downtime_threshold:
+            downtime_events.append(value)
     t1 = time.perf_counter()
     print(f"Generation complete in {(t1 - t0):.3f} seconds.")
 
@@ -65,10 +71,20 @@ def generate_and_analyze_cooldowns():
         print("Error: Cooldown times list is empty.")
         return
 
+    downtime_np = np.array(downtime_events)
+
     # Stats for logging/plotting
     mean_time = cooldown_times_np.mean()
     min_time = cooldown_times_np.min()
     max_time = cooldown_times_np.max()
+    downtime_count = downtime_np.size
+    downtime_summary = {}
+    if downtime_count:
+        downtime_summary = {
+            "median": float(np.median(downtime_np)),
+            "p90": float(np.percentile(downtime_np, 90)),
+            "p99": float(np.percentile(downtime_np, 99)),
+        }
 
     # 2) Log the generated times to file (Logs/<name>-logs-<ts>.txt)
     try:
@@ -78,12 +94,30 @@ def generate_and_analyze_cooldowns():
             f.write(f"Total Entries: {NUM_ENTRIES}\n")
             f.write(f"Mean Cooldown: {mean_time:.4f}s\n")
             f.write(f"Range: [{min_time:.4f}s, {max_time:.4f}s]\n")
+            f.write(
+                f"Downtime threshold: {downtime_threshold:.2f}s (events: {downtime_count})\n"
+            )
+            if downtime_count:
+                f.write(
+                    "Downtime stats: median={median:.2f}s, p90={p90:.2f}s, p99={p99:.2f}s\n".format(
+                        **downtime_summary
+                    )
+                )
             f.write("-" * 30 + "\n")
             for t in cooldown_times:
                 f.write(f"Cooldown: {t:.6f} s\n")
         print(f"Successfully logged {NUM_ENTRIES} cooldowns to {LOG_FILENAME}")
     except OSError as e:
         print(f"Error writing log file {LOG_FILENAME}: {e}")
+
+    if downtime_count:
+        print(
+            f"Captured {downtime_count} downtime events (>= {downtime_threshold:.1f}s)."
+        )
+    else:
+        print(
+            "No generated cooldowns crossed the downtime threshold this run."
+        )
 
     # 3) Plot (same figures/layout as before)
     if plt:
@@ -167,7 +201,38 @@ def generate_and_analyze_cooldowns():
         ax_log.tick_params(axis="y", which="minor", left=False)
 
         # bottom-right (unused) removed to keep your layout
-        fig.delaxes(fig.add_subplot(gs[1, 1]))
+        ax_downtime = fig.add_subplot(gs[1, 1])
+        if downtime_count:
+            downtime_bins = np.logspace(
+                np.log10(downtime_np.min()),
+                np.log10(downtime_np.max()),
+                DOWNTIME_HISTOGRAM_BINS,
+            )
+            ax_downtime.hist(
+                downtime_np,
+                bins=downtime_bins,
+                color="#2ca02c",
+                edgecolor="none",
+                alpha=0.85,
+            )
+            ax_downtime.set_xscale("log")
+            ax_downtime.set_xlabel("Downtime Duration (s)", fontsize=10)
+            ax_downtime.set_ylabel("Count", fontsize=10)
+            ax_downtime.set_title(
+                "Session Downtime Distribution (log bins)", fontsize=12
+            )
+            ax_downtime.grid(axis="y", alpha=0.4, linestyle=":")
+        else:
+            ax_downtime.axis("off")
+            ax_downtime.text(
+                0.5,
+                0.5,
+                "No downtimes above threshold\n(for current run)",
+                ha="center",
+                va="center",
+                fontsize=11,
+                transform=ax_downtime.transAxes,
+            )
 
         fig.suptitle(
             f"Human Cooldown Simulation Results (N={NUM_ENTRIES})",

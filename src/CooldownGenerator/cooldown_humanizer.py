@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+import time
 from dataclasses import dataclass
 from math import exp, log, log1p
 
@@ -80,15 +81,27 @@ class HumanCooldown:
         short_break_sigma_ln: float | None = None,
         long_break_mu_ln: float | None = None,
         long_break_sigma_ln: float | None = None,
+        medium_break_s: tuple[float, float] = (120.0, 600.0),
+        medium_break_mu_ln: float | None = None,
+        medium_break_sigma_ln: float | None = None,
+        overnight_break_s: tuple[float, float] = (2400.0, 14400.0),
+        overnight_break_mu_ln: float | None = None,
+        overnight_break_sigma_ln: float | None = None,
         short_break_warmup_factor: float = 1.0,
         long_break_warmup_factor: float = 1.6,
+        medium_break_warmup_factor: float = 1.3,
+        overnight_break_warmup_factor: float = 2.4,
         short_break_floor: float | None = None,
         long_break_floor: float | None = None,
+        medium_break_floor: float | None = None,
+        overnight_break_floor: float | None = None,
+        circadian_break_windows: dict[str, dict[str, float | tuple[int, int]]] | None = None,
         break_rekey_threshold: float = 60.0,
         break_progression_ticks: float = 260.0,
         break_progression_strength: float = 2.4,
         break_progression_exponent: float = 1.12,
         break_progression_cap: float = 0.22,
+        long_break_progression_cap: float = 0.55,
         break_warmup_duration_window: float = 15.0,
         # Warm-up after any break
         warmup_clicks: int = 12,
@@ -100,6 +113,10 @@ class HumanCooldown:
         deterministic_key: bytes | None = None,  # set for reproducible sessions
         # Truncation controls
         max_truncation_resamples: int = 12,  # safety cap for rejection sampling
+        fatigue_soft_seconds: float = 1800.0,
+        fatigue_hard_seconds: float = 7200.0,
+        fatigue_reset_seconds: float = 900.0,
+        fatigue_hazard_strength: float = 1.6,
     ):
         self.base = base
         self.min_clip = min_clip
@@ -120,14 +137,21 @@ class HumanCooldown:
         self.short_break_s = self._sanitise_bounds(short_break_s)
         self.p_long_break = p_long_break
         self.long_break_s = self._sanitise_bounds(long_break_s)
+        self.medium_break_s = self._sanitise_bounds(medium_break_s)
+        self.overnight_break_s = self._sanitise_bounds(overnight_break_s)
         self.short_break_warmup_factor = max(0.0, short_break_warmup_factor)
         self.long_break_warmup_factor = max(0.0, long_break_warmup_factor)
+        self.medium_break_warmup_factor = max(0.0, medium_break_warmup_factor)
+        self.overnight_break_warmup_factor = max(0.0, overnight_break_warmup_factor)
         self.break_rekey_threshold = max(0.0, break_rekey_threshold)
         self.break_progression_ticks = max(1.0, break_progression_ticks)
         self.break_progression_strength = max(0.0, break_progression_strength)
         self.break_progression_exponent = max(0.1, break_progression_exponent)
         self.break_progression_cap = max(
             self.p_break, min(0.95, break_progression_cap)
+        )
+        self.long_break_progression_cap = max(
+            self.break_progression_cap, min(0.95, long_break_progression_cap)
         )
         self.break_warmup_duration_window = max(1.0, break_warmup_duration_window)
         self.short_break_floor = (
@@ -140,17 +164,37 @@ class HumanCooldown:
             if long_break_floor is not None
             else max(3.0, self.long_break_s[0] * 0.5)
         )
+        self.medium_break_floor = (
+            medium_break_floor
+            if medium_break_floor is not None
+            else max(1.0, self.medium_break_s[0] * 0.8)
+        )
+        self.overnight_break_floor = (
+            overnight_break_floor
+            if overnight_break_floor is not None
+            else max(5.0, self.overnight_break_s[0] * 0.6)
+        )
 
         self._short_break_mu_user = short_break_mu_ln is not None
         self._short_break_sigma_user = short_break_sigma_ln is not None
         self._long_break_mu_user = long_break_mu_ln is not None
         self._long_break_sigma_user = long_break_sigma_ln is not None
+        self._medium_break_mu_user = medium_break_mu_ln is not None
+        self._medium_break_sigma_user = medium_break_sigma_ln is not None
+        self._overnight_break_mu_user = overnight_break_mu_ln is not None
+        self._overnight_break_sigma_user = overnight_break_sigma_ln is not None
 
         short_mu_guess, short_sigma_guess = self._lognormal_from_bounds(
             self.short_break_s
         )
         long_mu_guess, long_sigma_guess = self._lognormal_from_bounds(
             self.long_break_s
+        )
+        medium_mu_guess, medium_sigma_guess = self._lognormal_from_bounds(
+            self.medium_break_s
+        )
+        overnight_mu_guess, overnight_sigma_guess = self._lognormal_from_bounds(
+            self.overnight_break_s
         )
 
         self.short_break_mu_ln = (
@@ -170,6 +214,26 @@ class HumanCooldown:
             long_break_sigma_ln
             if long_break_sigma_ln is not None
             else long_sigma_guess,
+        )
+        self.medium_break_mu_ln = (
+            medium_break_mu_ln if medium_break_mu_ln is not None else medium_mu_guess
+        )
+        self.medium_break_sigma_ln = max(
+            1e-6,
+            medium_break_sigma_ln
+            if medium_break_sigma_ln is not None
+            else medium_sigma_guess,
+        )
+        self.overnight_break_mu_ln = (
+            overnight_break_mu_ln
+            if overnight_break_mu_ln is not None
+            else overnight_mu_guess
+        )
+        self.overnight_break_sigma_ln = max(
+            1e-6,
+            overnight_break_sigma_ln
+            if overnight_break_sigma_ln is not None
+            else overnight_sigma_guess,
         )
         self.warmup_clicks = warmup_clicks
         self.warmup_bias = warmup_bias
@@ -204,6 +268,12 @@ class HumanCooldown:
         self._design_long_break_factor = tuple(
             v / self._design_base for v in self.long_break_s
         )
+        self._design_medium_break_factor = tuple(
+            v / self._design_base for v in self.medium_break_s
+        )
+        self._design_overnight_break_factor = tuple(
+            v / self._design_base for v in self.overnight_break_s
+        )
         self._design_warmup_bias_factor = warmup_bias / self._design_base
         self._design_slip_mu_ln = slip_mu_ln
         self._design_fast_slip_decay_factor = fast_slip_decay / self._design_base
@@ -223,11 +293,23 @@ class HumanCooldown:
         self._design_long_break_floor_factor = (
             self.long_break_floor / self._design_base
         )
+        self._design_medium_break_floor_factor = (
+            self.medium_break_floor / self._design_base
+        )
+        self._design_overnight_break_floor_factor = (
+            self.overnight_break_floor / self._design_base
+        )
         self._design_short_break_mu_ln = (
             self.short_break_mu_ln if self._short_break_mu_user else None
         )
         self._design_long_break_mu_ln = (
             self.long_break_mu_ln if self._long_break_mu_user else None
+        )
+        self._design_medium_break_mu_ln = (
+            self.medium_break_mu_ln if self._medium_break_mu_user else None
+        )
+        self._design_overnight_break_mu_ln = (
+            self.overnight_break_mu_ln if self._overnight_break_mu_user else None
         )
         self._design_short_break_sigma_ln = (
             self.short_break_sigma_ln if self._short_break_sigma_user else None
@@ -235,6 +317,78 @@ class HumanCooldown:
         self._design_long_break_sigma_ln = (
             self.long_break_sigma_ln if self._long_break_sigma_user else None
         )
+        self._design_medium_break_sigma_ln = (
+            self.medium_break_sigma_ln if self._medium_break_sigma_user else None
+        )
+        self._design_overnight_break_sigma_ln = (
+            self.overnight_break_sigma_ln if self._overnight_break_sigma_user else None
+        )
+
+        default_circadian = {
+            "medium": {
+                "window": (10, 15),
+                "median": 420.0,
+                "off_median": 270.0,
+                "floor": 150.0,
+                "off_floor": 90.0,
+                "boost": 1.3,
+                "off_boost": 0.9,
+            },
+            "overnight": {
+                "window": (22, 6),
+                "median": 7200.0,
+                "off_median": 5400.0,
+                "floor": 2400.0,
+                "off_floor": 1500.0,
+                "boost": 2.0,
+                "off_boost": 0.7,
+            },
+        }
+        user_circadian = circadian_break_windows or {}
+        circadian_config: dict[str, dict[str, float | tuple[int, int]]] = {}
+        for key in set(default_circadian) | set(user_circadian):
+            merged: dict[str, float | tuple[int, int]] = dict(
+                default_circadian.get(key, {})
+            )
+            merged.update(user_circadian.get(key, {}))
+            window = merged.get("window")
+            if isinstance(window, (list, tuple)) and len(window) == 2:
+                start, end = int(window[0]), int(window[1])
+                merged["window"] = (
+                    max(0, min(23, start)),
+                    max(0, min(23, end)),
+                )
+            circadian_config[key] = merged
+        self.circadian_break_windows = circadian_config
+
+        long_band = max(0.0, min(0.95, self.p_long_break))
+        medium_share = long_band * 0.35
+        overnight_share = long_band * 0.2
+        long_share = max(0.0, long_band - medium_share - overnight_share)
+        short_share = max(1e-6, 1.0 - long_band)
+        self._profile_base_weights = {
+            "short": short_share,
+            "long": max(1e-6, long_share),
+            "medium": max(1e-6, medium_share),
+            "overnight": max(1e-6, overnight_share),
+        }
+        self._long_weight_total = (
+            self._profile_base_weights["long"]
+            + self._profile_base_weights["medium"]
+            + self._profile_base_weights["overnight"]
+        )
+
+        self.fatigue_soft_seconds = max(0.0, fatigue_soft_seconds)
+        self.fatigue_hard_seconds = max(
+            self.fatigue_soft_seconds + 1.0, fatigue_hard_seconds
+        )
+        self.fatigue_reset_seconds = max(1.0, fatigue_reset_seconds)
+        self.fatigue_hazard_strength = max(0.0, fatigue_hazard_strength)
+
+        self._session_start_wall = time.time()
+        self._session_seconds = 0.0
+        self._last_tick_wall_time = self._session_start_wall
+        self._profile_refresh_hour: int | None = None
 
         self._refresh_break_profiles()
 
@@ -255,7 +409,49 @@ class HumanCooldown:
         mu = (log(lo) + log(hi)) / 2.0
         return mu, sigma
 
-    def _refresh_break_profiles(self) -> None:
+    @staticmethod
+    def _hour_in_window(hour: int, window: tuple[int, int]) -> bool:
+        start, end = window
+        start %= 24
+        end %= 24
+        if start == end:
+            return True
+        if start < end:
+            return start <= hour < end
+        return hour >= start or hour < end
+
+    def _refresh_break_profiles(self, hour: int | None = None) -> None:
+        if hour is None:
+            hour = time.localtime().tm_hour
+        self._profile_refresh_hour = hour
+
+        def _band(name: str, floor_default: float, median_default: float) -> tuple[float, float]:
+            config = self.circadian_break_windows.get(name, {})
+            window = config.get("window")
+            in_window = False
+            if isinstance(window, tuple):
+                in_window = self._hour_in_window(hour, window)
+            floor_key = "floor" if in_window else "off_floor"
+            median_key = "median" if in_window else "off_median"
+            floor_val = config.get(floor_key, floor_default)
+            median_val = config.get(median_key, median_default)
+            try:
+                floor = max(0.5, float(floor_val))
+            except (TypeError, ValueError):
+                floor = floor_default
+            try:
+                median = max(0.5, float(median_val))
+            except (TypeError, ValueError):
+                median = median_default
+            return floor, median
+
+        medium_floor, medium_median = _band(
+            "medium", self.medium_break_floor, exp(self.medium_break_mu_ln)
+        )
+        overnight_floor, overnight_median = _band(
+            "overnight", self.overnight_break_floor, exp(self.overnight_break_mu_ln)
+        )
+
         self._break_profiles = {
             "short": BreakProfile(
                 "short",
@@ -271,9 +467,49 @@ class HumanCooldown:
                 self.long_break_warmup_factor,
                 self.long_break_floor,
             ),
+            "medium": BreakProfile(
+                "medium",
+                log(medium_median),
+                self.medium_break_sigma_ln,
+                self.medium_break_warmup_factor,
+                medium_floor,
+            ),
+            "overnight": BreakProfile(
+                "overnight",
+                log(overnight_median),
+                self.overnight_break_sigma_ln,
+                self.overnight_break_warmup_factor,
+                overnight_floor,
+            ),
         }
 
-    def _compute_break_hazard(self) -> float:
+    def _circadian_multiplier(self, profile: str, hour: int) -> float:
+        config = self.circadian_break_windows.get(profile)
+        if not config:
+            return 1.0
+        window = config.get("window")
+        in_window = False
+        if isinstance(window, tuple):
+            in_window = self._hour_in_window(hour, window)
+        key = "boost" if in_window else "off_boost"
+        value = config.get(key, 1.0)
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _fatigue_multiplier(self) -> float:
+        if self._session_seconds <= self.fatigue_soft_seconds:
+            return 1.0
+        span = max(1.0, self.fatigue_hard_seconds - self.fatigue_soft_seconds)
+        progress = min(1.0, (self._session_seconds - self.fatigue_soft_seconds) / span)
+        return 1.0 + progress * self.fatigue_hazard_strength
+
+    def _compute_break_hazard(self) -> dict[str, float]:
+        current_hour = time.localtime().tm_hour
+        if self._profile_refresh_hour != current_hour:
+            self._refresh_break_profiles(current_hour)
+
         exposure_ticks = max(0.0, self._ticks_since_break)
         exposure_seconds = max(0.0, self._seconds_since_break)
         baseline_scale = max(1.0, self.break_progression_ticks)
@@ -281,12 +517,62 @@ class HumanCooldown:
         scaled = exposure_ticks / baseline_scale + exposure_seconds / base_seconds
         ramp = log1p(scaled)
         boost = 1.0 + self.break_progression_strength * (ramp ** self.break_progression_exponent)
-        hazard = self.p_break * boost
-        return min(self.break_progression_cap, hazard)
 
-    def _select_break_profile(self) -> BreakProfile:
-        if self._rng.random() < self.p_long_break:
-            return self._break_profiles["long"]
+        base_hazard = self.p_break * boost
+        long_portion = max(0.0, min(1.0, self.p_long_break))
+        short_base = base_hazard * max(0.0, 1.0 - long_portion)
+        short_hazard = min(self.break_progression_cap, short_base)
+
+        longish_base = base_hazard * long_portion
+        longish_base *= self._fatigue_multiplier()
+
+        weights: dict[str, float] = {}
+        for profile in ("long", "medium", "overnight"):
+            base_weight = self._profile_base_weights.get(profile, 0.0)
+            if base_weight <= 0.0:
+                weights[profile] = 0.0
+                continue
+            circ = self._circadian_multiplier(profile, current_hour)
+            weights[profile] = base_weight * circ
+
+        weighted_total = sum(weights.values())
+        base_total = self._long_weight_total if self._long_weight_total > 0 else 1.0
+        if weighted_total > 0:
+            circadian_boost = max(0.0, weighted_total / base_total)
+            longish_base *= circadian_boost
+        else:
+            longish_base = 0.0
+
+        longish_base = min(self.long_break_progression_cap, longish_base)
+
+        hazards: dict[str, float] = {"short": short_hazard}
+
+        if longish_base <= 0.0 or weighted_total <= 0.0:
+            hazards.update({"long": 0.0, "medium": 0.0, "overnight": 0.0})
+            return hazards
+
+        for profile in ("long", "medium", "overnight"):
+            weight = weights.get(profile, 0.0)
+            if weight <= 0.0:
+                hazards[profile] = 0.0
+                continue
+            share = weight / weighted_total
+            hazards[profile] = min(self.long_break_progression_cap, longish_base * share)
+
+        return hazards
+
+    def _select_break_profile(
+        self, hazards: dict[str, float], total: float
+    ) -> BreakProfile:
+        r = self._rng.random() * max(total, 1e-9)
+        cumulative = 0.0
+        for name in ("short", "medium", "long", "overnight"):
+            hazard = max(0.0, hazards.get(name, 0.0))
+            if hazard <= 0.0:
+                continue
+            cumulative += hazard
+            if r < cumulative:
+                return self._break_profiles[name]
         return self._break_profiles["short"]
 
     def _sample_break_duration(self, profile: BreakProfile) -> float:
@@ -313,11 +599,15 @@ class HumanCooldown:
         return x
 
     def _maybe_break(self) -> BreakEvent | None:
-        hazard = self._compute_break_hazard()
-        if self._rng.random() >= hazard:
+        hazards = self._compute_break_hazard()
+        total_hazard = sum(max(0.0, h) for h in hazards.values())
+        total_hazard = max(0.0, min(0.95, total_hazard))
+        if total_hazard <= 0.0:
+            return None
+        if self._rng.random() >= total_hazard:
             return None
 
-        profile = self._select_break_profile()
+        profile = self._select_break_profile(hazards, total_hazard)
         duration = self._sample_break_duration(profile)
         warmup_clicks = self._compute_warmup_clicks(duration, profile)
         return BreakEvent(profile.name, duration, warmup_clicks)
@@ -326,6 +616,15 @@ class HumanCooldown:
 
     def next(self) -> float:
         """Return the next cooldown (seconds)."""
+        now = time.time()
+        if self._last_tick_wall_time is not None:
+            rest_wall = max(0.0, now - self._last_tick_wall_time)
+            if rest_wall >= self.fatigue_reset_seconds:
+                self._session_seconds = max(0.0, self._session_seconds - rest_wall)
+        else:
+            self._session_start_wall = now
+        self._last_tick_wall_time = now
+
         self._ticks += 1
         if (self._ticks % self._rekey_every) == 0:
             n = self._ticks // self._rekey_every
@@ -406,6 +705,7 @@ class HumanCooldown:
         # 8) Guard & bookkeeping
         result = max(self.absolute_min_cooldown, total)
         self._seconds_since_break += result
+        self._session_seconds += result
         return result
 
     # --- configuration helpers ---
@@ -435,13 +735,27 @@ class HumanCooldown:
         long_scaled = tuple(
             max(5.0, base * f) for f in self._design_long_break_factor
         )
+        medium_scaled = tuple(
+            max(5.0, base * f) for f in self._design_medium_break_factor
+        )
+        overnight_scaled = tuple(
+            max(30.0, base * f) for f in self._design_overnight_break_factor
+        )
         self.short_break_s = self._sanitise_bounds(short_scaled)
         self.long_break_s = self._sanitise_bounds(long_scaled)
+        self.medium_break_s = self._sanitise_bounds(medium_scaled)
+        self.overnight_break_s = self._sanitise_bounds(overnight_scaled)
         self.short_break_floor = max(
             0.1, base * self._design_short_break_floor_factor
         )
         self.long_break_floor = max(
             0.1, base * self._design_long_break_floor_factor
+        )
+        self.medium_break_floor = max(
+            0.1, base * self._design_medium_break_floor_factor
+        )
+        self.overnight_break_floor = max(
+            0.1, base * self._design_overnight_break_floor_factor
         )
 
         if self._design_short_break_mu_ln is not None and scale > 0:
@@ -465,6 +779,32 @@ class HumanCooldown:
 
         if self._design_long_break_sigma_ln is not None:
             self.long_break_sigma_ln = max(1e-6, self._design_long_break_sigma_ln)
+
+        if self._design_medium_break_mu_ln is not None and scale > 0:
+            self.medium_break_mu_ln = self._design_medium_break_mu_ln + log(scale)
+        else:
+            medium_mu, medium_sigma = self._lognormal_from_bounds(self.medium_break_s)
+            self.medium_break_mu_ln = medium_mu
+            if not self._medium_break_sigma_user:
+                self.medium_break_sigma_ln = medium_sigma
+
+        if self._design_medium_break_sigma_ln is not None:
+            self.medium_break_sigma_ln = max(1e-6, self._design_medium_break_sigma_ln)
+
+        if self._design_overnight_break_mu_ln is not None and scale > 0:
+            self.overnight_break_mu_ln = self._design_overnight_break_mu_ln + log(scale)
+        else:
+            overnight_mu, overnight_sigma = self._lognormal_from_bounds(
+                self.overnight_break_s
+            )
+            self.overnight_break_mu_ln = overnight_mu
+            if not self._overnight_break_sigma_user:
+                self.overnight_break_sigma_ln = overnight_sigma
+
+        if self._design_overnight_break_sigma_ln is not None:
+            self.overnight_break_sigma_ln = max(
+                1e-6, self._design_overnight_break_sigma_ln
+            )
 
         self.warmup_bias = self._design_warmup_bias_factor * base
 
