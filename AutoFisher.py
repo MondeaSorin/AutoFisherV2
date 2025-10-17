@@ -585,6 +585,14 @@ def check_loop():
         raw_text = ocr_screenshot(img)
         raw_text_lower = raw_text.lower()
 
+        if "posted above" in raw_text_lower:
+            stop_script(
+                "Emergency stop phrase detected.",
+                details="Detected 'posted above' within on-screen text.",
+                exit_program=True,
+            )
+            return
+
         # Log periodic status for diagnostic purposes
         log_event("INFO", "check_loop", "Screen scan (periodic check).", raw_text)
 
