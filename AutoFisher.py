@@ -54,6 +54,9 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 # CAPTCHA HANDLING CONSTANTS
 ANTI_BOT_DISABLE_DURATION = 10 * 60  # 10 minutes
 POST_CAPTCHA_DELAY_RANGE = (4, 10)  # Seconds
+# Minimum + jittered delay before submitting solved captcha codes to mimic human timing
+SOLVER_INPUT_DELAY_RANGE = (12, 18)  # Seconds (minimum wait is enforced)
+SOLVER_INPUT_DELAY_JITTER = (-0.9, 1.4)  # Extra random jitter applied to the base delay
 EMERGENCY_SEARCH_TIMEOUT = 30  # Seconds to wait for anti-bot prompt after emergency text
 
 # =====================================================================
@@ -467,6 +470,24 @@ def clear_input_line():
 
 
 # =====================================================================
+# --- HUMANIZED DELAY HELPERS ---
+# =====================================================================
+
+def generate_solver_input_delay():
+    """Returns a randomized delay before entering the solved captcha code."""
+
+    base_delay = random.uniform(*SOLVER_INPUT_DELAY_RANGE)
+
+    jitter = random.uniform(*SOLVER_INPUT_DELAY_JITTER)
+
+    delay = max(base_delay + jitter, SOLVER_INPUT_DELAY_RANGE[0])
+
+    microbreaks = sum(random.uniform(0.15, 0.45) for _ in range(random.randint(0, 2)))
+
+    return delay + microbreaks
+
+
+# =====================================================================
 # --- 5. CAPTCHA VERIFICATION HELPERS ---
 # =====================================================================
 
@@ -495,6 +516,17 @@ def verify_solver_response_timing(code):
     Sends /verify code, then uses the complex 35s/10s timing (solver path).
     Returns True (success and resume) or False (stop script).
     """
+
+    delay_before_input = generate_solver_input_delay()
+    log_event(
+        "COMMAND",
+        "verify_solver_response_timing",
+        (
+            f"Humanized wait {delay_before_input:.2f}s before submitting solver result /verify {code}."
+        ),
+    )
+
+    time.sleep(delay_before_input)
 
     log_event("COMMAND", "verify_solver_response_timing", f"Inputting solver result: /verify {code}")
     clear_input_line()
