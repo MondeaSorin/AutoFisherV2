@@ -54,6 +54,7 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 # CAPTCHA HANDLING CONSTANTS
 ANTI_BOT_DISABLE_DURATION = 10 * 60  # 10 minutes
 POST_CAPTCHA_DELAY_RANGE = (4, 10)  # Seconds
+EMERGENCY_SEARCH_TIMEOUT = 30  # Seconds to wait for anti-bot prompt after emergency text
 
 # =====================================================================
 # --- 2. GLOBAL STATE AND THREAD CONTROLS ---
@@ -70,6 +71,8 @@ LAST_SOLVED_CODE = None
 ANTI_BOT_DISABLED_UNTIL = 0.0
 LAST_SUPPRESSION_LOG = 0.0
 is_code = False
+emergency_monitoring = False
+EMERGENCY_TRIGGERED_AT = 0.0
 
 # =====================================================================
 # --- 3. LOGGING AND CONTROL FUNCTIONS ---
@@ -571,6 +574,8 @@ def check_loop():
     global LAST_SOLVED_CODE
     global ANTI_BOT_DISABLED_UNTIL
     global LAST_SUPPRESSION_LOG
+    global emergency_monitoring
+    global EMERGENCY_TRIGGERED_AT
 
     while running:
         if paused.is_set():
@@ -586,12 +591,17 @@ def check_loop():
         raw_text_lower = raw_text.lower()
 
         if "posted above" in raw_text_lower:
-            stop_script(
-                "Emergency stop phrase detected.",
-                details="Detected 'posted above' within on-screen text.",
-                exit_program=True,
-            )
-            return
+            if not captcha_found.is_set():
+                captcha_found.set()
+            if not emergency_monitoring:
+                log_event(
+                    "WARNING",
+                    "check_loop",
+                    "Emergency stop phrase detected. Awaiting anti-bot challenge.",
+                    raw_text,
+                )
+                emergency_monitoring = True
+                EMERGENCY_TRIGGERED_AT = time.time()
 
         # Log periodic status for diagnostic purposes
         log_event("INFO", "check_loop", "Screen scan (periodic check).", raw_text)
@@ -599,6 +609,13 @@ def check_loop():
         # --- CAPTCHA DETECTION FLOW ---
 
         if "anti-bot" in raw_text_lower:
+            if emergency_monitoring and ("code" in raw_text_lower):
+                emergency_monitoring = False
+                log_event(
+                    "INFO",
+                    "check_loop",
+                    "Emergency monitoring satisfied by anti-bot code detection.",
+                )
             if "code:" in raw_text_lower:
                 is_code = True
             current_time = time.time()
@@ -658,6 +675,14 @@ def check_loop():
             if captcha_found.is_set():
                 captcha_found.clear()
 
+        if emergency_monitoring and (time.time() - EMERGENCY_TRIGGERED_AT) > EMERGENCY_SEARCH_TIMEOUT:
+            stop_script(
+                "Anti-bot prompt not found after emergency warning.",
+                details="Emergency stop phrase persisted without locating anti-bot challenge.",
+                exit_program=True,
+            )
+            return
+
     log_event("INFO", "check_loop", "Thread stopped.")
 
 def start_script():
@@ -667,6 +692,8 @@ def start_script():
     global check_thread
     global LAST_SOLVED_CODE
     global ANTI_BOT_DISABLED_UNTIL
+    global emergency_monitoring
+    global EMERGENCY_TRIGGERED_AT
 
     if running:
         print("Script is already running.")
@@ -678,6 +705,8 @@ def start_script():
     LAST_SOLVED_CODE = None
     ANTI_BOT_DISABLED_UNTIL = 0.0
     LAST_SUPPRESSION_LOG = 0.0
+    emergency_monitoring = False
+    EMERGENCY_TRIGGERED_AT = 0.0
     log_event("START", "start_script", "Bot threads initialized and started.")
 
     print("\n--- Starting Bot ---")
