@@ -704,7 +704,7 @@ def check_loop():
             captcha_found.clear()
 
         else:
-            if captcha_found.is_set():
+            if captcha_found.is_set() and not emergency_monitoring:
                 captcha_found.clear()
 
         if emergency_monitoring and (time.time() - EMERGENCY_TRIGGERED_AT) > EMERGENCY_SEARCH_TIMEOUT:
