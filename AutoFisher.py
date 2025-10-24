@@ -74,6 +74,8 @@ LAST_SOLVED_CODE = None
 ANTI_BOT_DISABLED_UNTIL = 0.0
 LAST_SUPPRESSION_LOG = 0.0
 is_code = False
+EMERGENCY_DISABLED_UNTIL = 0.0
+EMERGENCY_SUPPRESSION_LOG = 0.0
 emergency_monitoring = False
 EMERGENCY_TRIGGERED_AT = 0.0
 
@@ -608,6 +610,8 @@ def check_loop():
     global LAST_SUPPRESSION_LOG
     global emergency_monitoring
     global EMERGENCY_TRIGGERED_AT
+    global EMERGENCY_DISABLED_UNTIL
+    global EMERGENCY_SUPPRESSION_LOG
 
     while running:
         if paused.is_set():
@@ -622,18 +626,38 @@ def check_loop():
         raw_text = ocr_screenshot(img)
         raw_text_lower = raw_text.lower()
 
+        current_time = time.time()
+
         if "posted above" in raw_text_lower:
-            if not captcha_found.is_set():
-                captcha_found.set()
-            if not emergency_monitoring:
-                log_event(
-                    "WARNING",
-                    "check_loop",
-                    "Emergency stop phrase detected. Awaiting anti-bot challenge.",
-                    raw_text,
-                )
-                emergency_monitoring = True
-                EMERGENCY_TRIGGERED_AT = time.time()
+            if current_time < EMERGENCY_DISABLED_UNTIL:
+                if emergency_monitoring:
+                    emergency_monitoring = False
+                remaining = EMERGENCY_DISABLED_UNTIL - current_time
+                if remaining < 0:
+                    remaining = 0
+                if current_time - EMERGENCY_SUPPRESSION_LOG >= 5:
+                    log_event(
+                        "INFO",
+                        "check_loop",
+                        (
+                            "Emergency detection suppressed after recent anti-bot activity. "
+                            f"Resuming checks in {remaining:.0f}s."
+                        ),
+                        raw_text,
+                    )
+                    EMERGENCY_SUPPRESSION_LOG = current_time
+            else:
+                if not captcha_found.is_set():
+                    captcha_found.set()
+                if not emergency_monitoring:
+                    log_event(
+                        "WARNING",
+                        "check_loop",
+                        "Emergency stop phrase detected. Awaiting anti-bot challenge.",
+                        raw_text,
+                    )
+                    emergency_monitoring = True
+                    EMERGENCY_TRIGGERED_AT = current_time
 
         # Log periodic status for diagnostic purposes
         log_event("INFO", "check_loop", "Screen scan (periodic check).", raw_text)
@@ -641,15 +665,22 @@ def check_loop():
         # --- CAPTCHA DETECTION FLOW ---
 
         if "anti-bot" in raw_text_lower:
-            if emergency_monitoring and ("code" in raw_text_lower):
+            # if "code:" in raw_text_lower:
+            #     is_code = True
+
+            if emergency_monitoring:
                 emergency_monitoring = False
+                EMERGENCY_DISABLED_UNTIL = max(
+                    EMERGENCY_DISABLED_UNTIL, time.time() + ANTI_BOT_DISABLE_DURATION
+                )
+                EMERGENCY_SUPPRESSION_LOG = 0.0
+
                 log_event(
                     "INFO",
                     "check_loop",
-                    "Emergency monitoring satisfied by anti-bot code detection.",
+                    "Emergency monitoring satisfied by locating anti-bot prompt.",
                 )
-            if "code:" in raw_text_lower:
-                is_code = True
+
             current_time = time.time()
 
             if current_time < ANTI_BOT_DISABLED_UNTIL:
@@ -687,7 +718,9 @@ def check_loop():
 
             LAST_SOLVED_CODE = solved_code
             ANTI_BOT_DISABLED_UNTIL = time.time() + ANTI_BOT_DISABLE_DURATION
+            EMERGENCY_DISABLED_UNTIL = max(EMERGENCY_DISABLED_UNTIL, ANTI_BOT_DISABLED_UNTIL)
             LAST_SUPPRESSION_LOG = 0.0
+            EMERGENCY_SUPPRESSION_LOG = 0.0
 
             delay = random.uniform(*POST_CAPTCHA_DELAY_RANGE)
             disable_minutes = ANTI_BOT_DISABLE_DURATION / 60
@@ -726,6 +759,8 @@ def start_script():
     global ANTI_BOT_DISABLED_UNTIL
     global emergency_monitoring
     global EMERGENCY_TRIGGERED_AT
+    global EMERGENCY_DISABLED_UNTIL
+    global EMERGENCY_SUPPRESSION_LOG
 
     if running:
         print("Script is already running.")
@@ -739,6 +774,9 @@ def start_script():
     LAST_SUPPRESSION_LOG = 0.0
     emergency_monitoring = False
     EMERGENCY_TRIGGERED_AT = 0.0
+    EMERGENCY_DISABLED_UNTIL = 0.0
+    EMERGENCY_SUPPRESSION_LOG = 0.0
+
     log_event("START", "start_script", "Bot threads initialized and started.")
 
     print("\n--- Starting Bot ---")
